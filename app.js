@@ -71,6 +71,14 @@ const FONT_LIMITS = {
   },
 };
 
+const NORMAL_PARSE_DELAY = 220;
+
+const LARGE_FILE_LIMITS = {
+  lines: 20000,
+  bytes: 1024 * 1024,
+  parseDelay: 480,
+};
+
 /**
  * JSON 文本搜索的开关集合。
  *
@@ -98,6 +106,7 @@ const FONT_LIMITS = {
  */
 
 const SEARCH_WORD_BOUNDARY_CLASS = "\\p{L}\\p{N}_$";
+const UTF8_ENCODER = new TextEncoder();
 
 /**
  * 获取页面中的必需元素。
@@ -159,6 +168,33 @@ function formatBytes(bytes) {
  */
 function formatCount(value) {
   return new Intl.NumberFormat("zh-CN").format(value);
+}
+
+/**
+ * 扫描当前文本规模。
+ *
+ * 这里专门返回“行数 + 字节数 + 是否跨过大文件阈值”，供输入阶段直接复用：
+ * 一旦阈值判断、统计展示和解析调度各自重新扫描整段大文本，粘贴超大 JSON 时主线程会被重复拖慢。
+ *
+ * @param {string} text 原始文本。
+ * @return {{ lines: number, bytes: number, isLarge: boolean }} 规模信息。
+ */
+function measureTextScale(text) {
+  let lines = text.length === 0 ? 0 : 1;
+
+  for (let index = 0; index < text.length; index += 1) {
+    if (text.charCodeAt(index) === 10) {
+      lines += 1;
+    }
+  }
+
+  const bytes = UTF8_ENCODER.encode(text).length;
+
+  return {
+    lines,
+    bytes,
+    isLarge: lines >= LARGE_FILE_LIMITS.lines || bytes >= LARGE_FILE_LIMITS.bytes,
+  };
 }
 
 /**
@@ -681,6 +717,35 @@ function buildMetaGrid(cards) {
 }
 
 /**
+ * 构建预览区的大文件处理中卡片。
+ *
+ * loading 不是单纯装饰，而是向用户明确说明“当前不是卡死，而是在等待大文件解析结果”；
+ * 同时把规模信息放进去，用户能立刻知道为什么这次刷新会比平时慢。
+ *
+ * @param {{ lines: number, bytes: number }} scale 当前文本规模。
+ * @return {HTMLElement} loading 节点。
+ */
+function buildProcessingState(scale) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "empty-state loading-state";
+
+  const spinner = document.createElement("span");
+  spinner.className = "loading-spinner";
+  spinner.setAttribute("aria-hidden", "true");
+
+  const title = document.createElement("strong");
+  title.className = "loading-title";
+  title.textContent = "正在处理大文件 JSON…";
+
+  const detail = document.createElement("span");
+  detail.className = "loading-detail";
+  detail.textContent = `${formatCount(scale.lines)} 行 · ${formatBytes(scale.bytes)} · 预览会在解析完成后自动刷新。`;
+
+  wrapper.append(spinner, title, detail);
+  return wrapper;
+}
+
+/**
  * 识别一行 JSON 文本中的语法片段。
  *
  * 这里不依赖完整 JSON.parse，而是用容错正则做轻量标记：
@@ -1171,6 +1236,10 @@ class JsonPrismDeckApp {
     /** @type {number} */
     this.parseVersion = 0;
     /** @type {number | null} */
+    this.parseTimer = null;
+    /** @type {number | null} */
+    this.editorRefreshId = null;
+    /** @type {number | null} */
     this.noticeTimer = null;
     /** @type {string | null} */
     this.noticeText = null;
@@ -1190,11 +1259,15 @@ class JsonPrismDeckApp {
     this.nodeMap = new Map();
     /** @type {Map<string, { startLine: number, endLine: number }>} */
     this.formattedRangeByPath = new Map();
+    /** @type {{ lines: number, bytes: number, isLarge: boolean }} */
+    this.editorScale = measureTextScale(DEFAULT_SETTINGS.text);
 
     this.state = {
       ...DEFAULT_SETTINGS,
       valid: false,
       empty: false,
+      isProcessing: false,
+      isLargeFileMode: false,
       metadata: null,
       error: null,
       nodes: [],
@@ -1214,10 +1287,6 @@ class JsonPrismDeckApp {
     this.schedulePersist = debounce(() => {
       void this.persistState();
     }, 180);
-
-    this.scheduleParse = debounce(() => {
-      void this.refreshJsonState();
-    }, 220);
 
     this.refs = {
       body: document.body,
@@ -1276,6 +1345,7 @@ class JsonPrismDeckApp {
    */
   async init() {
     await this.restoreState();
+    this.updateEditorScale(this.state.text);
     this.bindEvents();
 
     this.refs.jsonEditor.value = this.state.text;
@@ -1301,6 +1371,106 @@ class JsonPrismDeckApp {
     this.renderLineNumbers();
     this.refreshEditorMetrics();
     await this.refreshJsonState();
+  }
+
+  /**
+   * 根据当前文本更新编辑区规模缓存。
+   *
+   * 规模缓存是大文件模式、顶部摘要、行号数量和解析节奏的共同输入；
+   * 统一在这里更新，避免每条输入路径各自重新扫一遍全文本。
+   *
+   * @param {string} text 当前编辑区文本。
+   * @return {void}
+   */
+  updateEditorScale(text) {
+    this.editorScale = measureTextScale(text);
+    this.state.isLargeFileMode = this.editorScale.isLarge;
+  }
+
+  /**
+   * 取消已排队但尚未执行的解析任务。
+   *
+   * @return {void}
+   */
+  cancelScheduledParse() {
+    if (this.parseTimer === null) {
+      return;
+    }
+
+    window.clearTimeout(this.parseTimer);
+    this.parseTimer = null;
+  }
+
+  /**
+   * 按当前文本规模安排下一次解析。
+   *
+   * 大文件不适合沿用普通输入的 220ms 节奏，否则一次粘贴或连打几个字符就会把 worker 队列塞满；
+   * 这里统一拉长大文件等待时间，让主线程先把输入稳定下来，再发起一次有效解析。
+   *
+   * @param {{ immediate?: boolean }} [options] 调度选项。
+   * @return {void}
+   */
+  scheduleParseRefresh(options = {}) {
+    this.cancelScheduledParse();
+    const delay = options.immediate ? 0 : (this.state.isLargeFileMode ? LARGE_FILE_LIMITS.parseDelay : NORMAL_PARSE_DELAY);
+    this.parseTimer = window.setTimeout(() => {
+      this.parseTimer = null;
+      void this.refreshJsonState();
+    }, delay);
+  }
+
+  /**
+   * 取消已排队的编辑区附属视图刷新。
+   *
+   * @return {void}
+   */
+  cancelScheduledEditorRefresh() {
+    if (this.editorRefreshId === null) {
+      return;
+    }
+
+    window.cancelAnimationFrame(this.editorRefreshId);
+    this.editorRefreshId = null;
+  }
+
+  /**
+   * 刷新编辑区的高亮层、行号和统计。
+   *
+   * 这些都属于“附属视图”，不决定真实输入内容；在大文件场景下允许它们比 textarea 本身晚一帧更新，
+   * 先让 loading 进屏，用户感知会明显好于把所有 DOM 工作都塞在同一个 input 事件里。
+   *
+   * @return {void}
+   */
+  refreshEditorAssistiveViews() {
+    if (this.state.searchTarget === "editor") {
+      this.updateEditorSearchResults();
+    }
+
+    this.renderEditorSyntax();
+    this.renderLineNumbers();
+    this.refreshEditorMetrics();
+  }
+
+  /**
+   * 安排编辑区附属视图刷新。
+   *
+   * @param {boolean} defer 是否延后到下一帧。
+   * @return {void}
+   */
+  scheduleEditorAssistiveRefresh(defer) {
+    this.cancelScheduledEditorRefresh();
+
+    if (!defer) {
+      this.refreshEditorAssistiveViews();
+      return;
+    }
+
+    this.editorRefreshId = window.requestAnimationFrame(() => {
+      this.editorRefreshId = null;
+      this.refreshEditorAssistiveViews();
+      this.renderSummary();
+      this.updateActionAvailability();
+    });
   }
 
   /**
@@ -1585,16 +1755,30 @@ class JsonPrismDeckApp {
    */
   handleEditorInput() {
     this.state.text = this.refs.jsonEditor.value;
-    if (this.state.searchTarget === "editor") {
-      this.updateEditorSearchResults();
+    this.updateEditorScale(this.state.text);
+
+    if (this.state.isLargeFileMode) {
+      this.state.isProcessing = true;
+      this.refreshEditorMetrics();
+      this.renderHeroMetrics();
+      this.renderSummary();
+      this.renderSelection();
+      this.renderPreview();
+      this.updateActionAvailability();
+      this.schedulePersist();
+      this.scheduleEditorAssistiveRefresh(true);
+      this.scheduleParseRefresh();
+      return;
     }
-    this.renderEditorSyntax();
-    this.renderLineNumbers();
-    this.refreshEditorMetrics();
+
+    this.state.isProcessing = false;
+    this.scheduleEditorAssistiveRefresh(false);
+    this.renderHeroMetrics();
     this.renderSummary();
+    this.renderSelection();
     this.updateActionAvailability();
     this.schedulePersist();
-    this.scheduleParse();
+    this.scheduleParseRefresh();
   }
 
   /**
@@ -1637,17 +1821,29 @@ class JsonPrismDeckApp {
   replaceEditorText(text) {
     this.refs.jsonEditor.value = text;
     this.state.text = text;
+    this.updateEditorScale(text);
 
-    if (this.state.searchTarget === "editor") {
-      this.updateEditorSearchResults();
+    if (this.state.isLargeFileMode) {
+      this.state.isProcessing = true;
+      this.refreshEditorMetrics();
+      this.renderHeroMetrics();
+      this.renderSummary();
+      this.renderSelection();
+      this.renderPreview();
+      this.updateActionAvailability();
+      this.scheduleEditorAssistiveRefresh(true);
+      this.scheduleParseRefresh();
+      this.schedulePersist();
+      return;
     }
 
-    this.renderEditorSyntax();
-    this.renderLineNumbers();
-    this.refreshEditorMetrics();
+    this.state.isProcessing = false;
+    this.scheduleEditorAssistiveRefresh(false);
+    this.renderHeroMetrics();
     this.renderSummary();
+    this.renderSelection();
     this.updateActionAvailability();
-    void this.refreshJsonState();
+    this.scheduleParseRefresh({ immediate: true });
     this.schedulePersist();
   }
 
@@ -1669,10 +1865,13 @@ class JsonPrismDeckApp {
    * @return {Promise<void>}
    */
   async refreshJsonState() {
+    this.cancelScheduledParse();
     this.state.text = this.refs.jsonEditor.value;
+    this.updateEditorScale(this.state.text);
     const text = this.state.text;
 
     if (!text.trim()) {
+      this.state.isProcessing = false;
       this.applyEmptyState();
       this.renderAll();
       return;
@@ -1697,6 +1896,10 @@ class JsonPrismDeckApp {
         this.applyInvalidResult(result);
       }
     } catch (error) {
+      if (version !== this.parseVersion) {
+        return;
+      }
+
       this.applyWorkerFailure(error instanceof Error ? error.message : String(error));
     }
 
@@ -1737,6 +1940,7 @@ class JsonPrismDeckApp {
   applyValidResult(result) {
     const hadValidTree = this.state.valid && this.state.nodes.length > 0;
 
+    this.state.isProcessing = false;
     this.state.valid = true;
     this.state.empty = false;
     this.state.error = null;
@@ -1773,6 +1977,7 @@ class JsonPrismDeckApp {
    * @return {void}
    */
   applyInvalidResult(result) {
+    this.state.isProcessing = false;
     this.state.valid = false;
     this.state.empty = false;
     this.state.metadata = result.metadata;
@@ -1797,6 +2002,8 @@ class JsonPrismDeckApp {
    * @return {void}
    */
   applyEmptyState() {
+    this.state.isProcessing = false;
+    this.state.isLargeFileMode = false;
     this.state.valid = false;
     this.state.empty = true;
     this.state.metadata = {
@@ -1826,6 +2033,7 @@ class JsonPrismDeckApp {
    * @return {void}
    */
   applyWorkerFailure(message) {
+    this.state.isProcessing = false;
     this.state.valid = false;
     this.state.empty = false;
     this.state.error = {
@@ -1836,11 +2044,11 @@ class JsonPrismDeckApp {
       position: null,
     };
     this.state.nodes = [];
-    this.state.metadata = buildRawRows(this.state.text, null).length
+    this.state.metadata = this.state.text.length > 0
       ? {
           chars: this.state.text.length,
-          bytes: new TextEncoder().encode(this.state.text).length,
-          lines: this.state.text.split("\n").length,
+          bytes: this.editorScale.bytes,
+          lines: this.editorScale.lines,
         }
       : {
           chars: 0,
@@ -2418,14 +2626,20 @@ class JsonPrismDeckApp {
   /**
    * 计算当前树形视图的可见行。
    *
-   * @return {Array<{ node: any, depth: number, expanded: boolean, isMatch: boolean, isSelected: boolean }>} 虚拟滚动行。
+   * @return {Array<
+   *   | { kind: "node", node: any, depth: number, expanded: boolean, isMatch: boolean, isSelected: boolean }
+   *   | { kind: "tail" }
+   * >} 虚拟滚动行。
    */
   buildVisibleTreeRows() {
     if (!this.state.valid || !this.nodeMap.has(this.state.rootId)) {
       return [];
     }
 
-    /** @type {Array<{ node: any, depth: number, expanded: boolean, isMatch: boolean, isSelected: boolean }>} */
+    /** @type {Array<
+     *   | { kind: "node", node: any, depth: number, expanded: boolean, isMatch: boolean, isSelected: boolean }
+     *   | { kind: "tail" }
+     * >} */
     const rows = [];
     /** @type {Array<{ id: string, depth: number }>} */
     const stack = [{ id: this.state.rootId, depth: 0 }];
@@ -2445,6 +2659,7 @@ class JsonPrismDeckApp {
 
       const expanded = this.isNodeExpanded(node.id);
       rows.push({
+        kind: "node",
         node,
         depth: current.depth,
         expanded,
@@ -2462,6 +2677,9 @@ class JsonPrismDeckApp {
       }
     }
 
+    // 树形视图末尾没有源码收行可参考，尤其大对象下很难肉眼确认“是不是已经到底”；
+    // 因此固定补一行尾标，只在真正滚到末尾时出现，作为明确的结束反馈。
+    rows.push({ kind: "tail" });
     return rows;
   }
 
@@ -2471,10 +2689,9 @@ class JsonPrismDeckApp {
    * @return {void}
    */
   renderAll() {
+    this.cancelScheduledEditorRefresh();
     this.renderFontControls();
-    this.renderEditorSyntax();
-    this.renderLineNumbers();
-    this.refreshEditorMetrics();
+    this.refreshEditorAssistiveViews();
     this.renderHeroMetrics();
     this.renderSummary();
     this.renderSelection();
@@ -2488,7 +2705,7 @@ class JsonPrismDeckApp {
    * @return {void}
    */
   renderLineNumbers() {
-    const lineCount = Math.max(1, this.refs.jsonEditor.value.split("\n").length);
+    const lineCount = Math.max(1, this.editorScale.lines);
     const fragment = document.createDocumentFragment();
     const matchedLines = new Set(this.state.searchTarget === "editor" ? this.state.editorSearchMatches.map((match) => match.lineNumber) : []);
     const currentEditorMatch = this.state.searchTarget === "editor"
@@ -2579,12 +2796,8 @@ class JsonPrismDeckApp {
    * @return {void}
    */
   refreshEditorMetrics() {
-    const text = this.refs.jsonEditor.value;
-    const lines = text.length === 0 ? 0 : text.split("\n").length;
-    const bytes = new TextEncoder().encode(text).length;
-
-    this.refs.editorLineStats.textContent = `${formatCount(lines)} 行`;
-    this.refs.editorByteStats.textContent = formatBytes(bytes);
+    this.refs.editorLineStats.textContent = `${formatCount(this.editorScale.lines)} 行`;
+    this.refs.editorByteStats.textContent = formatBytes(this.editorScale.bytes);
   }
 
   /**
@@ -2724,6 +2937,11 @@ class JsonPrismDeckApp {
    * @return {void}
    */
   renderHeroMetrics() {
+    if (this.state.isProcessing) {
+      this.refs.heroValidity.textContent = "处理中";
+      return;
+    }
+
     if (this.state.empty) {
       this.refs.heroValidity.textContent = "等待输入";
       return;
@@ -2740,7 +2958,15 @@ class JsonPrismDeckApp {
   renderSummary() {
     const chips = [];
 
-    if (this.state.empty) {
+    if (this.state.isProcessing) {
+      chips.push({ text: "处理中", className: "is-warning" });
+      chips.push({ text: `字节 · ${formatBytes(this.editorScale.bytes)}`, className: "" });
+      chips.push({ text: `行数 · ${formatCount(this.editorScale.lines)}`, className: "" });
+
+      if (this.state.isLargeFileMode) {
+        chips.push({ text: "大文件模式", className: "" });
+      }
+    } else if (this.state.empty) {
       chips.push({ text: "等待 JSON 输入", className: "" });
     } else if (this.state.valid) {
       chips.push({ text: "校验通过", className: "is-success" });
@@ -2786,6 +3012,12 @@ class JsonPrismDeckApp {
    * @return {void}
    */
   renderSelection() {
+    if (this.state.isProcessing) {
+      this.refs.selectionPath.textContent = "$";
+      this.refs.selectionMeta.textContent = "正在重新计算预览节点。";
+      return;
+    }
+
     if (!this.state.valid) {
       this.refs.selectionPath.textContent = "$";
       this.refs.selectionMeta.textContent = this.state.empty
@@ -2814,8 +3046,13 @@ class JsonPrismDeckApp {
    * @return {void}
    */
   renderPreview() {
-    this.refs.previewContent.classList.toggle("is-invalid", !this.state.valid && !this.state.empty);
+    this.refs.previewContent.classList.toggle("is-invalid", !this.state.isProcessing && !this.state.valid && !this.state.empty);
     this.renderPreviewState();
+
+    if (this.state.isProcessing) {
+      this.previewList.setStaticContent(buildProcessingState(this.editorScale));
+      return;
+    }
 
     if (this.state.empty) {
       const empty = document.createElement("div");
@@ -2859,7 +3096,7 @@ class JsonPrismDeckApp {
     });
     this.previewList.setItems(rows);
 
-    const selectedIndex = rows.findIndex((row) => row.node.id === this.state.selectedNodeId);
+    const selectedIndex = rows.findIndex((row) => row.kind === "node" && row.node.id === this.state.selectedNodeId);
 
     if (selectedIndex !== -1 && this.state.searchMatches.length > 0) {
       this.previewList.scrollToIndex(selectedIndex);
@@ -2954,12 +3191,30 @@ class JsonPrismDeckApp {
   /**
    * 创建一行树节点。
    *
-   * @param {{ node: any, depth: number, expanded: boolean, isMatch: boolean, isSelected: boolean }} row 行数据。
+   * @param {
+   *   | { kind: "node", node: any, depth: number, expanded: boolean, isMatch: boolean, isSelected: boolean }
+   *   | { kind: "tail" }
+   * } row 行数据。
    * @param {SearchPlan | null} searchPlan 当前搜索计划。
    * @param {number} index 当前可见行序号，从 0 开始。
    * @return {HTMLElement} 行元素。
    */
   renderTreeRow(row, searchPlan, index) {
+    if (row.kind === "tail") {
+      const element = document.createElement("div");
+      element.className = "preview-row tree-row tree-row-tail";
+
+      const number = document.createElement("div");
+      number.className = "tree-line-number tree-line-number-tail";
+
+      const content = document.createElement("div");
+      content.className = "tree-row-content tree-row-tail-content";
+      content.textContent = "已经到底啦～";
+
+      element.append(number, content);
+      return element;
+    }
+
     const element = document.createElement("div");
     element.className = "preview-row tree-row";
     element.dataset.nodeId = row.node.id;
@@ -3192,6 +3447,13 @@ class JsonPrismDeckApp {
       return;
     }
 
+    if (this.state.isProcessing) {
+      this.refs.previewState.textContent = this.state.isLargeFileMode
+        ? `正在处理大文件 JSON：${formatCount(this.editorScale.lines)} 行，${formatBytes(this.editorScale.bytes)}。`
+        : "正在刷新预览。";
+      return;
+    }
+
     if (this.searchPlan.error) {
       this.refs.previewState.textContent = `搜索表达式无效：${this.searchPlan.error}`;
       return;
@@ -3210,7 +3472,7 @@ class JsonPrismDeckApp {
     }
 
     if (this.state.previewMode === "tree") {
-      const visible = this.buildVisibleTreeRows().length;
+      const visible = this.buildVisibleTreeRows().filter((row) => row.kind === "node").length;
       this.refs.previewState.textContent = `树形预览 · 可见节点 ${formatCount(visible)} / 总节点 ${formatCount(this.state.metadata.nodeCount)} · 已启用虚拟滚动。`;
       return;
     }
@@ -3232,20 +3494,21 @@ class JsonPrismDeckApp {
   updateActionAvailability() {
     const hasText = this.refs.jsonEditor.value.trim().length > 0;
     const hasValidJson = this.state.valid;
+    const isBusy = this.state.isProcessing;
     const structuredPreviewMode = hasValidJson && (this.state.previewMode === "tree" || this.state.previewMode === "text");
     const matchCount = this.getActiveSearchMatchCount();
 
-    this.refs.formatBtn.disabled = !hasValidJson;
-    this.refs.minifyBtn.disabled = !hasValidJson;
-    this.refs.sortFormatBtn.disabled = !hasValidJson;
+    this.refs.formatBtn.disabled = isBusy || !hasValidJson;
+    this.refs.minifyBtn.disabled = isBusy || !hasValidJson;
+    this.refs.sortFormatBtn.disabled = isBusy || !hasValidJson;
     this.refs.copyBtn.disabled = !hasText;
     this.refs.downloadBtn.disabled = !hasText;
-    this.refs.expandAllBtn.disabled = !structuredPreviewMode;
-    this.refs.collapseAllBtn.disabled = !structuredPreviewMode;
-    this.refs.copyPathBtn.disabled = !hasValidJson;
-    this.refs.copyValueBtn.disabled = !hasValidJson;
-    this.refs.searchPrevBtn.disabled = matchCount === 0;
-    this.refs.searchNextBtn.disabled = matchCount === 0;
+    this.refs.expandAllBtn.disabled = isBusy || !structuredPreviewMode;
+    this.refs.collapseAllBtn.disabled = isBusy || !structuredPreviewMode;
+    this.refs.copyPathBtn.disabled = isBusy || !hasValidJson;
+    this.refs.copyValueBtn.disabled = isBusy || !hasValidJson;
+    this.refs.searchPrevBtn.disabled = isBusy || matchCount === 0;
+    this.refs.searchNextBtn.disabled = isBusy || matchCount === 0;
   }
 
   /**
