@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>JSON Prism Deck</title>
+    <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body data-theme="dawn">
+    <div class="app-shell">
+      <div class="ambient ambient-a"></div>
+      <div class="ambient ambient-b"></div>
+      <header class="titlebar glass-card">
+        <div class="brand-block">
+          <div class="brand-icon-wrap">
+            <img class="brand-icon" src="icons/icon.svg" alt="JSON Prism Deck" />
+          </div>
+          <div class="brand-copy">
+            <h1>JSON Prism Deck</h1>
+            <p class="subtitle">离线 JSON 工作台</p>
+          </div>
+        </div>
+        <div class="header-tools">
+          <div id="summaryChips" class="summary-chips"></div>
+          <div class="search-box">
+            <select id="searchTargetSelect" class="search-target-select" aria-label="搜索区域">
+              <option value="preview">搜预览</option>
+              <option value="editor">搜编辑</option>
+            </select>
+            <input id="searchInput" type="search" placeholder="搜索键名 / 值 / 路径" />
+            <div class="search-actions">
+              <button id="searchPrevBtn" class="icon-btn" aria-label="上一个匹配">↑</button>
+              <button id="searchNextBtn" class="icon-btn" aria-label="下一个匹配">↓</button>
+              <span id="searchCount" class="mini-pill">0 / 0</span>
+            </div>
+          </div>
+        </div>
+        <div class="hero-metrics">
+          <div class="metric-chip">
+            <span class="metric-label">状态</span>
+            <strong id="heroValidity">待校验</strong>
+          </div>
+        </div>
+      </header>
+
+      <div class="main-stage">
+        <div class="content-stage">
+          <main id="workspace" class="workspace" data-layout="horizontal">
+            <section class="panel editor-panel glass-card">
+              <header class="panel-head">
+                <div><h2>编辑区</h2></div>
+                <div class="panel-actions">
+                  <span id="editorLineStats" class="mini-pill">0 行</span>
+                  <span id="editorByteStats" class="mini-pill">0 B</span>
+                </div>
+              </header>
+              <div id="editorDropzone" class="editor-shell">
+                <div id="lineNumbers" class="line-numbers" aria-hidden="true"></div>
+                <div class="editor-code-wrap">
+                  <pre id="editorSyntax" class="editor-syntax" aria-hidden="true"></pre>
+                  <textarea
+                    id="jsonEditor"
+                    class="json-editor"
+                    spellcheck="false"
+                    autocomplete="off"
+                    autocorrect="off"
+                    autocapitalize="off"
+                    wrap="off"
+                    placeholder="把 JSON 粘贴到这里，或者拖放一个 .json 文件。"
+                  ></textarea>
+                </div>
+              </div>
+              <footer class="panel-foot">
+                <span id="editorHint">快捷键：⌘/Ctrl + Shift + F 格式化，⌘/Ctrl + Shift + M 压缩。</span>
+              </footer>
+            </section>
+
+            <div id="splitter" class="splitter" role="separator" aria-orientation="vertical" tabindex="0"></div>
+
+            <section class="panel preview-panel glass-card">
+              <header class="panel-head preview-head">
+                <div><h2>预览区</h2></div>
+                <div class="preview-toolbar">
+                  <div class="segmented" role="group" aria-label="预览模式">
+                    <button class="segment-btn is-active" data-preview-mode="tree">树形</button>
+                    <button class="segment-btn" data-preview-mode="text">文本</button>
+                    <button class="segment-btn" data-preview-mode="meta">元数据</button>
+                  </div>
+                  <label class="tool-field compact">
+                    <span>排序</span>
+                    <select id="sortSelect">
+                      <option value="source">源顺序</option>
+                      <option value="asc">字母升序</option>
+                      <option value="desc">字母降序</option>
+                    </select>
+                  </label>
+                  <button id="expandAllBtn" class="tool-btn">展开全部</button>
+                  <button id="collapseAllBtn" class="tool-btn">折叠全部</button>
+                </div>
+              </header>
+
+              <div id="previewState" class="preview-state"></div>
+              <div id="previewContent" class="preview-content" aria-live="polite"></div>
+
+              <footer class="selection-bar">
+                <div class="selection-copy">
+                  <span class="selection-label">当前节点</span>
+                  <strong id="selectionPath">$</strong>
+                  <span id="selectionMeta" class="selection-meta">尚未选中节点</span>
+                </div>
+                <div class="selection-actions">
+                  <button id="copyPathBtn" class="tool-btn">复制路径</button>
+                  <button id="copyValueBtn" class="tool-btn">复制值</button>
+                </div>
+              </footer>
+            </section>
+          </main>
+        </div>
+
+        <aside class="toolbar glass-card" aria-label="主工具栏">
+          <section class="toolbar-section">
+            <div class="toolbar-group">
+              <button id="formatBtn" class="tool-btn primary">格式化</button>
+              <button id="minifyBtn" class="tool-btn">压缩</button>
+              <button id="sortFormatBtn" class="tool-btn">按预览排序格式化</button>
+              <button id="copyBtn" class="tool-btn">复制</button>
+              <button id="downloadBtn" class="tool-btn">下载</button>
+              <button id="importBtn" class="tool-btn">导入</button>
+              <button id="sampleBtn" class="tool-btn accent">示例数据</button>
+              <button id="clearBtn" class="tool-btn danger">清空</button>
+            </div>
+          </section>
+
+          <section class="toolbar-section">
+            <div class="toolbar-group toolbar-settings">
+              <label class="tool-field">
+                <span>文本预览缩进</span>
+                <select id="indentSelect">
+                  <option value="2">2 空格</option>
+                  <option value="4">4 空格</option>
+                </select>
+              </label>
+              <span>布局</span>
+              <div class="segmented" role="group" aria-label="布局模式">
+                <button class="segment-btn is-active" data-layout="horizontal">左右</button>
+                <button class="segment-btn" data-layout="vertical">上下</button>
+              </div>
+              <span>主题</span>
+              <div class="segmented" role="group" aria-label="主题模式">
+                <button class="segment-btn is-active" data-theme-choice="dawn">晨曦</button>
+                <button class="segment-btn" data-theme-choice="night">夜航</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="toolbar-section">
+            <div class="toolbar-group toolbar-zoom-list">
+              <div class="toolbar-zoom-item">
+                <span class="toolbar-zoom-label">编辑区字号</span>
+                <div class="toolbar-zoom-controls">
+                  <button id="editorFontDownBtn" class="tool-btn" type="button" aria-label="缩小编辑区字号">A-</button>
+                  <button id="editorFontResetBtn" class="tool-btn" type="button" aria-label="重置编辑区字号">15px</button>
+                  <button id="editorFontUpBtn" class="tool-btn" type="button" aria-label="放大编辑区字号">A+</button>
+                </div>
+              </div>
+              <div class="toolbar-zoom-item">
+                <span class="toolbar-zoom-label">预览区字号</span>
+                <div class="toolbar-zoom-controls">
+                  <button id="previewFontDownBtn" class="tool-btn" type="button" aria-label="缩小预览区字号">A-</button>
+                  <button id="previewFontResetBtn" class="tool-btn" type="button" aria-label="重置预览区字号">14px</button>
+                  <button id="previewFontUpBtn" class="tool-btn" type="button" aria-label="放大预览区字号">A+</button>
+                </div>
+              </div>
+            </div>
+          </section>
+        </aside>
+      </div>
+
+      <div id="noticeToast" class="notice-toast" role="status" aria-live="polite" aria-atomic="true"></div>
+    </div>
+
+    <input id="fileInput" type="file" accept=".json,application/json,text/plain" hidden />
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
