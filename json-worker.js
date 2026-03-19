@@ -425,7 +425,9 @@ function buildTree(rootValue, sortMode) {
       }
     }
 
-    node.searchText = [node.keyLabel, node.path, node.preview, node.metaLabel, node.type].join(" ").toLowerCase();
+    // 搜索大小写敏感与否由主线程的搜索计划决定，这里必须保留原始大小写语料；
+    // 否则一旦在 worker 侧先做 toLowerCase，`Aa` 开关就会失去实现空间。
+    node.searchText = [node.keyLabel, node.path, node.preview, node.metaLabel, node.type].join(" ");
     nodes.push(node);
   }
 

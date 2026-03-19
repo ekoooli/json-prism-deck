@@ -29,6 +29,38 @@
               <option value="editor">搜编辑</option>
             </select>
             <input id="searchInput" type="search" placeholder="搜索键名 / 值 / 路径" />
+            <div class="search-mode-toggles" role="group" aria-label="搜索规则">
+              <button
+                id="searchCaseBtn"
+                class="search-option-btn"
+                type="button"
+                aria-label="区分大小写"
+                aria-pressed="false"
+                title="区分大小写"
+              >
+                Aa
+              </button>
+              <button
+                id="searchWholeWordBtn"
+                class="search-option-btn"
+                type="button"
+                aria-label="全字匹配"
+                aria-pressed="false"
+                title="全字匹配"
+              >
+                ab_
+              </button>
+              <button
+                id="searchRegexBtn"
+                class="search-option-btn"
+                type="button"
+                aria-label="使用正则表达式"
+                aria-pressed="false"
+                title="使用正则表达式"
+              >
+                .*
+              </button>
+            </div>
             <div class="search-actions">
               <button id="searchPrevBtn" class="icon-btn" aria-label="上一个匹配">↑</button>
               <button id="searchNextBtn" class="icon-btn" aria-label="下一个匹配">↓</button>

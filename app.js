@@ -51,6 +51,9 @@ const DEFAULT_SETTINGS = {
   workspaceRatio: 0.48,
   searchQuery: "",
   searchTarget: "preview",
+  searchCaseSensitive: false,
+  searchWholeWord: false,
+  searchRegex: false,
   editorFontSize: 15,
   previewFontSize: 14,
 };
@@ -67,6 +70,34 @@ const FONT_LIMITS = {
     default: DEFAULT_SETTINGS.previewFontSize,
   },
 };
+
+/**
+ * JSON 文本搜索的开关集合。
+ *
+ * 三个开关会同时作用于预览搜索和编辑区搜索，保证按钮状态、命中高亮和上下导航遵循同一套规则。
+ *
+ * @typedef {{
+ *   caseSensitive: boolean,
+ *   wholeWord: boolean,
+ *   regex: boolean
+ * }} SearchOptions
+ */
+
+/**
+ * 已编译的搜索计划。
+ *
+ * 主线程会在 query 或搜索选项变化时预先编译一次，后续树形高亮、文本高亮和编辑区命中只消费这份计划，
+ * 避免每次渲染都重复拼接正则源字符串。
+ *
+ * @typedef {{
+ *   query: string,
+ *   expression: RegExp | null,
+ *   error: string | null,
+ *   options: SearchOptions
+ * }} SearchPlan
+ */
+
+const SEARCH_WORD_BOUNDARY_CLASS = "\\p{L}\\p{N}_$";
 
 /**
  * 获取页面中的必需元素。
@@ -156,78 +187,192 @@ function debounce(callback, wait) {
 }
 
 /**
+ * 转义普通文本，使其可以安全进入正则表达式。
+ *
+ * 搜索默认是字面量模式，只有在用户显式打开 `.*` 时才走原始正则；
+ * 因此普通搜索词必须先转义，避免 `.`、`[` 这类字符被误当成正则元字符。
+ *
+ * @param {string} text 原始文本。
+ * @return {string} 已转义文本。
+ */
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * 根据 query 与按钮状态构建可复用的搜索计划。
+ *
+ * `wholeWord` 会统一包裹 Unicode 感知的词边界，
+ * 这样英文字段、数字下标以及中文字段名都能按“完整词”语义判断，而不是只照顾 ASCII。
+ *
+ * @param {string} query 原始搜索词。
+ * @param {SearchOptions} options 搜索选项。
+ * @return {SearchPlan} 已编译的搜索计划。
+ */
+function buildSearchPlan(query, options) {
+  const normalizedQuery = typeof query === "string" ? query : "";
+  const safeOptions = {
+    caseSensitive: Boolean(options.caseSensitive),
+    wholeWord: Boolean(options.wholeWord),
+    regex: Boolean(options.regex),
+  };
+
+  if (!normalizedQuery) {
+    return {
+      query: "",
+      expression: null,
+      error: null,
+      options: safeOptions,
+    };
+  }
+
+  let source = safeOptions.regex ? normalizedQuery : escapeRegExp(normalizedQuery);
+
+  if (safeOptions.wholeWord) {
+    source = `(?<![${SEARCH_WORD_BOUNDARY_CLASS}])(?:${source})(?![${SEARCH_WORD_BOUNDARY_CLASS}])`;
+  }
+
+  try {
+    return {
+      query: normalizedQuery,
+      expression: new RegExp(source, `${safeOptions.caseSensitive ? "g" : "gi"}u`),
+      error: null,
+      options: safeOptions,
+    };
+  } catch (error) {
+    return {
+      query: normalizedQuery,
+      expression: null,
+      error: error instanceof Error ? error.message : String(error),
+      options: safeOptions,
+    };
+  }
+}
+
+/**
+ * 克隆搜索正则。
+ *
+ * 全局正则会携带 `lastIndex`，因此每次执行匹配前都必须复制一份；
+ * 否则上一次搜索留下的游标会污染下一次高亮或命中统计。
+ *
+ * @param {SearchPlan | null} searchPlan 搜索计划。
+ * @return {RegExp | null} 可安全执行的正则副本。
+ */
+function cloneSearchExpression(searchPlan) {
+  if (!searchPlan?.expression) {
+    return null;
+  }
+
+  return new RegExp(searchPlan.expression.source, searchPlan.expression.flags);
+}
+
+/**
+ * 计算文本是否至少存在一个可见搜索命中。
+ *
+ * 零宽正则在编辑器语义里是合法的，但在本工具的树和文本高亮里无法直观展示，
+ * 所以这里只认“可见字符跨度”的命中，避免出现计数有结果、界面却完全无高亮的错觉。
+ *
+ * @param {string} text 原始文本。
+ * @param {SearchPlan | null} searchPlan 搜索计划。
+ * @return {boolean} 是否存在可见命中。
+ */
+function hasSearchMatch(text, searchPlan) {
+  if (!text || !searchPlan?.query || searchPlan.error) {
+    return false;
+  }
+
+  const expression = cloneSearchExpression(searchPlan);
+
+  if (!expression) {
+    return false;
+  }
+
+  let match = expression.exec(text);
+
+  while (match) {
+    if (match[0]) {
+      return true;
+    }
+
+    expression.lastIndex = match.index + 1;
+    match = expression.exec(text);
+  }
+
+  return false;
+}
+
+/**
  * 构建带高亮的文本片段。
  *
  * @param {string} text 原始文本。
- * @param {string} query 搜索关键字。
+ * @param {SearchPlan | null} searchPlan 搜索计划。
  * @return {DocumentFragment} 可直接挂到 DOM 的片段。
  */
-function buildHighlightedFragment(text, query) {
+function buildHighlightedFragment(text, searchPlan) {
   const fragment = document.createDocumentFragment();
+  const ranges = buildSearchRanges(text, searchPlan);
 
-  if (!query) {
+  if (ranges.length === 0) {
     fragment.append(document.createTextNode(text));
     return fragment;
   }
 
-  const lowerText = text.toLowerCase();
-  const lowerQuery = query.toLowerCase();
   let cursor = 0;
 
-  while (cursor < text.length) {
-    const index = lowerText.indexOf(lowerQuery, cursor);
-
-    if (index === -1) {
-      fragment.append(document.createTextNode(text.slice(cursor)));
-      break;
-    }
-
-    if (index > cursor) {
-      fragment.append(document.createTextNode(text.slice(cursor, index)));
+  for (const range of ranges) {
+    if (range.start > cursor) {
+      fragment.append(document.createTextNode(text.slice(cursor, range.start)));
     }
 
     const mark = document.createElement("mark");
     mark.className = "tree-highlight";
-    mark.textContent = text.slice(index, index + query.length);
+    mark.textContent = text.slice(range.start, range.end);
     fragment.append(mark);
-    cursor = index + query.length;
+    cursor = range.end;
+  }
+
+  if (cursor < text.length) {
+    fragment.append(document.createTextNode(text.slice(cursor)));
   }
 
   return fragment;
 }
 
 /**
- * 计算一段文本里所有大小写不敏感的匹配区间。
+ * 计算一段文本里所有可见匹配区间。
  *
  * 这里统一返回稳定的 start/end 区间，供编辑区高亮、文本预览高亮和命中计数复用；
  * 这样不同视图看到的是同一份搜索结果，不会因为每个视图各算一遍而把计数翻倍。
  *
  * @param {string} text 原始文本。
- * @param {string} query 搜索词。
+ * @param {SearchPlan | null} searchPlan 搜索计划。
  * @return {Array<{ start: number, end: number }>} 匹配区间列表。
  */
-function buildSearchRanges(text, query) {
-  if (!query) {
+function buildSearchRanges(text, searchPlan) {
+  if (!text || !searchPlan?.query || searchPlan.error) {
+    return [];
+  }
+
+  const expression = cloneSearchExpression(searchPlan);
+
+  if (!expression) {
     return [];
   }
 
   const ranges = [];
-  const lowerText = text.toLowerCase();
-  const lowerQuery = query.toLowerCase();
-  let cursor = 0;
+  let match = expression.exec(text);
 
-  while (cursor < text.length) {
-    const index = lowerText.indexOf(lowerQuery, cursor);
-
-    if (index === -1) {
-      break;
+  while (match) {
+    if (match[0]) {
+      ranges.push({
+        start: match.index,
+        end: match.index + match[0].length,
+      });
+    } else {
+      expression.lastIndex = match.index + 1;
     }
 
-    ranges.push({
-      start: index,
-      end: index + query.length,
-    });
-    cursor = index + Math.max(1, query.length);
+    match = expression.exec(text);
   }
 
   return ranges;
@@ -1031,12 +1176,20 @@ class JsonPrismDeckApp {
     this.noticeText = null;
     /** @type {"default" | "success" | "warning"} */
     this.noticeTone = "default";
-    /** @type {{ mode: "error" | "selection", index: number } | null} */
+    /** @type {SearchPlan} */
+    this.searchPlan = buildSearchPlan("", {
+      caseSensitive: DEFAULT_SETTINGS.searchCaseSensitive,
+      wholeWord: DEFAULT_SETTINGS.searchWholeWord,
+      regex: DEFAULT_SETTINGS.searchRegex,
+    });
+    /** @type {{ mode: "error", index: number } | null} */
     this.pendingScroll = null;
     /** @type {boolean} */
     this.isDraggingSplitter = false;
     /** @type {Map<string, any>} */
     this.nodeMap = new Map();
+    /** @type {Map<string, { startLine: number, endLine: number }>} */
+    this.formattedRangeByPath = new Map();
 
     this.state = {
       ...DEFAULT_SETTINGS,
@@ -1080,6 +1233,9 @@ class JsonPrismDeckApp {
       summaryChips: /** @type {HTMLElement} */ (getRequiredElement("summaryChips")),
       searchTargetSelect: /** @type {HTMLSelectElement} */ (getRequiredElement("searchTargetSelect")),
       searchInput: /** @type {HTMLInputElement} */ (getRequiredElement("searchInput")),
+      searchCaseBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("searchCaseBtn")),
+      searchWholeWordBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("searchWholeWordBtn")),
+      searchRegexBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("searchRegexBtn")),
       searchCount: /** @type {HTMLElement} */ (getRequiredElement("searchCount")),
       selectionPath: /** @type {HTMLElement} */ (getRequiredElement("selectionPath")),
       selectionMeta: /** @type {HTMLElement} */ (getRequiredElement("selectionMeta")),
@@ -1134,7 +1290,9 @@ class JsonPrismDeckApp {
     this.applyLayout(this.state.layout);
     this.applyTheme(this.state.theme);
     this.applyPreviewModeButtons();
+    this.refreshSearchPlan();
     this.renderSearchTargetControl();
+    this.renderSearchControls();
     this.renderSearchInputPlaceholder();
     this.applyTypographySettings();
     this.renderFontControls();
@@ -1205,6 +1363,10 @@ class JsonPrismDeckApp {
       this.schedulePersist();
     });
 
+    this.refs.searchCaseBtn.addEventListener("click", () => this.toggleSearchOption("searchCaseSensitive"));
+    this.refs.searchWholeWordBtn.addEventListener("click", () => this.toggleSearchOption("searchWholeWord"));
+    this.refs.searchRegexBtn.addEventListener("click", () => this.toggleSearchOption("searchRegex"));
+
     this.refs.sortSelect.addEventListener("change", () => {
       this.state.sortMode = /** @type {"source" | "asc" | "desc"} */ (this.refs.sortSelect.value);
       this.schedulePersist();
@@ -1253,19 +1415,8 @@ class JsonPrismDeckApp {
     });
 
     this.refs.searchInput.addEventListener("input", () => {
-      this.state.searchQuery = this.refs.searchInput.value.trim();
-      if (this.state.searchTarget === "preview") {
-        this.updateSearchResults();
-      } else {
-        this.updateEditorSearchResults();
-      }
-
-      this.renderSummary();
-      this.renderEditorSyntax();
-      this.renderLineNumbers();
-      this.renderPreview();
-      this.updateActionAvailability();
-      this.schedulePersist();
+      this.state.searchQuery = this.refs.searchInput.value;
+      this.handleSearchCriteriaChange();
     });
 
     this.refs.searchNextBtn.addEventListener("click", () => this.navigateSearch(1));
@@ -1337,6 +1488,9 @@ class JsonPrismDeckApp {
     this.state.workspaceRatio = clamp(Number(stored.workspaceRatio) || DEFAULT_SETTINGS.workspaceRatio, 0.25, 0.75);
     this.state.searchQuery = typeof stored.searchQuery === "string" ? stored.searchQuery : "";
     this.state.searchTarget = stored.searchTarget === "editor" ? "editor" : "preview";
+    this.state.searchCaseSensitive = Boolean(stored.searchCaseSensitive);
+    this.state.searchWholeWord = Boolean(stored.searchWholeWord);
+    this.state.searchRegex = Boolean(stored.searchRegex);
     this.state.editorFontSize = clamp(Number(stored.editorFontSize) || DEFAULT_SETTINGS.editorFontSize, FONT_LIMITS.editor.min, FONT_LIMITS.editor.max);
     this.state.previewFontSize = clamp(Number(stored.previewFontSize) || DEFAULT_SETTINGS.previewFontSize, FONT_LIMITS.preview.min, FONT_LIMITS.preview.max);
   }
@@ -1356,9 +1510,72 @@ class JsonPrismDeckApp {
       workspaceRatio: this.state.workspaceRatio,
       searchQuery: this.state.searchQuery,
       searchTarget: this.state.searchTarget,
+      searchCaseSensitive: this.state.searchCaseSensitive,
+      searchWholeWord: this.state.searchWholeWord,
+      searchRegex: this.state.searchRegex,
       editorFontSize: this.state.editorFontSize,
       previewFontSize: this.state.previewFontSize,
     });
+  }
+
+  /**
+   * 读取当前搜索开关状态。
+   *
+   * @return {SearchOptions} 当前搜索开关。
+   */
+  getSearchOptions() {
+    return {
+      caseSensitive: this.state.searchCaseSensitive,
+      wholeWord: this.state.searchWholeWord,
+      regex: this.state.searchRegex,
+    };
+  }
+
+  /**
+   * 重新编译搜索计划。
+   *
+   * @return {void}
+   */
+  refreshSearchPlan() {
+    this.searchPlan = buildSearchPlan(this.state.searchQuery, this.getSearchOptions());
+  }
+
+  /**
+   * 在 query 或搜索规则变化后统一刷新命中结果和相关视图。
+   *
+   * 搜索按钮影响的不只是高亮颜色，还会直接改变命中集合和上下导航顺序；
+   * 因此这里集中重算，避免某个视图还停留在旧规则上。
+   *
+   * @return {void}
+   */
+  handleSearchCriteriaChange() {
+    this.refreshSearchPlan();
+
+    if (this.state.searchTarget === "preview") {
+      this.updateSearchResults();
+    } else {
+      this.updateEditorSearchResults();
+    }
+
+    this.renderSearchControls();
+    this.renderSummary();
+    this.renderEditorSyntax();
+    this.renderLineNumbers();
+    this.renderSelection();
+    this.renderPreview();
+    this.updateActionAvailability();
+    this.schedulePersist();
+  }
+
+  /**
+   * 切换单个搜索规则按钮。
+   *
+   * @param {"searchCaseSensitive" | "searchWholeWord" | "searchRegex"} stateKey 状态字段。
+   * @return {void}
+   */
+  toggleSearchOption(stateKey) {
+    this.state[stateKey] = !this.state[stateKey];
+    this.handleSearchCriteriaChange();
   }
 
   /**
@@ -1529,6 +1746,7 @@ class JsonPrismDeckApp {
     this.state.rootId = result.rootId;
     this.state.expandableIds = new Set(result.expandableIds);
     this.nodeMap = new Map(result.nodes.map((node) => [node.id, node]));
+    this.rebuildFormattedRangeIndex();
 
     if (!hadValidTree || !this.state.hasCustomExpansion) {
       // 首次得到合法 JSON 时默认全部展开，满足“先看全貌，再按需收起”的浏览习惯。
@@ -1569,6 +1787,7 @@ class JsonPrismDeckApp {
     this.state.currentMatchIndex = 0;
     this.state.selectedNodeId = "$";
     this.nodeMap = new Map();
+    this.formattedRangeByPath = new Map();
     this.pendingScroll = result.error?.line ? { mode: "error", index: Math.max(0, result.error.line - 1) } : null;
   }
 
@@ -1596,6 +1815,7 @@ class JsonPrismDeckApp {
     this.state.currentMatchIndex = 0;
     this.state.selectedNodeId = "$";
     this.nodeMap = new Map();
+    this.formattedRangeByPath = new Map();
     this.pendingScroll = null;
   }
 
@@ -1628,6 +1848,63 @@ class JsonPrismDeckApp {
           lines: 0,
         };
     this.nodeMap = new Map();
+    this.formattedRangeByPath = new Map();
+  }
+
+  /**
+   * 重建“节点 path -> 格式化文本行区间”索引。
+   *
+   * 文本预览现在支持折叠容器，但又必须保持原始 pretty-print 文本完全一致；
+   * 因此这里先按树结构推导每个节点在完整格式化文本里的起止行，再由文本预览决定哪些区间要展开、哪些要折叠成单行。
+   *
+   * @return {void}
+   */
+  rebuildFormattedRangeIndex() {
+    this.formattedRangeByPath = new Map();
+
+    if (!this.state.valid || !this.nodeMap.has(this.state.rootId)) {
+      return;
+    }
+
+    /**
+     * 递归计算节点占用的完整行区间。
+     *
+     * 非空对象/数组在 pretty-print 后一定占“开括号一行 + 子节点若干行 + 关括号一行”；
+     * 叶子节点和空容器都只有一行。用这套规则推导区间，能让文本预览在折叠时直接复用 formattedText 原文。
+     *
+     * @param {string} nodeId 节点 id。
+     * @param {number} startLine 当前节点起始行，1-based。
+     * @return {number} 当前节点结束后的下一行号，仍为 1-based。
+     */
+    const walkNode = (nodeId, startLine) => {
+      const node = this.nodeMap.get(nodeId);
+
+      if (!node) {
+        return startLine;
+      }
+
+      if (!node.expandable || node.childIds.length === 0) {
+        this.formattedRangeByPath.set(node.id, {
+          startLine,
+          endLine: startLine,
+        });
+        return startLine + 1;
+      }
+
+      let nextLine = startLine + 1;
+
+      for (const childId of node.childIds) {
+        nextLine = walkNode(childId, nextLine);
+      }
+
+      this.formattedRangeByPath.set(node.id, {
+        startLine,
+        endLine: nextLine,
+      });
+      return nextLine + 1;
+    };
+
+    walkNode(this.state.rootId, 1);
   }
 
   /**
@@ -1636,9 +1913,7 @@ class JsonPrismDeckApp {
    * @return {void}
    */
   updateSearchResults() {
-    const query = this.state.searchQuery.trim().toLowerCase();
-
-    if (!this.state.valid || !query) {
+    if (!this.state.valid || !this.searchPlan.query || this.searchPlan.error) {
       this.state.searchMatches = [];
       this.state.autoExpandedIds = new Set();
       this.state.currentMatchIndex = 0;
@@ -1646,7 +1921,7 @@ class JsonPrismDeckApp {
     }
 
     const matches = this.state.nodes
-      .filter((node) => node.searchText.includes(query))
+      .filter((node) => hasSearchMatch(node.searchText, this.searchPlan))
       .map((node) => node.id);
 
     const ancestors = new Set();
@@ -1677,22 +1952,20 @@ class JsonPrismDeckApp {
 
     this.state.currentMatchIndex = 0;
     this.state.selectedNodeId = matches[0];
-    this.pendingScroll = { mode: "selection", index: 0 };
   }
 
   /**
    * 计算编辑区搜索命中。
    *
-   * 编辑区搜索直接基于原始文本做大小写不敏感匹配，
+   * 编辑区搜索直接基于原始文本做规则匹配，支持大小写、全字和正则三种开关组合；
    * 这样即使 JSON 还没通过校验，也能继续定位到正在排查的错误字段或值。
    *
    * @return {void}
    */
   updateEditorSearchResults() {
-    const query = this.state.searchQuery.trim();
     const text = this.refs.jsonEditor.value;
 
-    if (!query || !text) {
+    if (!this.searchPlan.query || this.searchPlan.error || !text) {
       this.state.editorSearchMatches = [];
       this.state.editorCurrentMatchIndex = 0;
       return;
@@ -1705,7 +1978,7 @@ class JsonPrismDeckApp {
 
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index];
-      const ranges = buildSearchRanges(line, query);
+      const ranges = buildSearchRanges(line, this.searchPlan);
 
       for (const range of ranges) {
         matches.push({
@@ -1749,6 +2022,38 @@ class JsonPrismDeckApp {
    */
   renderSearchTargetControl() {
     this.refs.searchTargetSelect.value = this.state.searchTarget;
+  }
+
+  /**
+   * 同步搜索按钮与输入框状态。
+   *
+   * @return {void}
+   */
+  renderSearchControls() {
+    const controls = [
+      {
+        element: this.refs.searchCaseBtn,
+        active: this.state.searchCaseSensitive,
+      },
+      {
+        element: this.refs.searchWholeWordBtn,
+        active: this.state.searchWholeWord,
+      },
+      {
+        element: this.refs.searchRegexBtn,
+        active: this.state.searchRegex,
+      },
+    ];
+
+    for (const control of controls) {
+      control.element.classList.toggle("is-active", control.active);
+      control.element.setAttribute("aria-pressed", control.active ? "true" : "false");
+    }
+
+    const invalid = Boolean(this.searchPlan.error);
+    this.refs.searchInput.classList.toggle("is-invalid", invalid);
+    this.refs.searchInput.setAttribute("aria-invalid", invalid ? "true" : "false");
+    this.refs.searchInput.title = invalid ? `搜索表达式无效：${this.searchPlan.error}` : "";
   }
 
   /**
@@ -1820,7 +2125,7 @@ class JsonPrismDeckApp {
    * @return {void}
    */
   handlePreviewClick(event) {
-    if (this.state.previewMode !== "tree" || !this.state.valid) {
+    if (this.state.previewMode === "meta" || !this.state.valid) {
       return;
     }
 
@@ -1912,6 +2217,19 @@ class JsonPrismDeckApp {
   }
 
   /**
+   * 判断节点在当前视图下是否处于展开状态。
+   *
+   * 搜索命中的祖先会被 `autoExpandedIds` 强制撑开，确保结果始终可见；
+   * 因此树形视图和文本视图都必须共用这套判断，避免一边展开、一边折叠。
+   *
+   * @param {string} nodeId 节点 id。
+   * @return {boolean} 是否展开。
+   */
+  isNodeExpanded(nodeId) {
+    return this.state.expandedIds.has(nodeId) || this.state.autoExpandedIds.has(nodeId);
+  }
+
+  /**
    * 判断节点是否被“预览搜索自动展开”锁定。
    *
    * 搜索态必须保证命中路径对用户可见，否则父节点一旦被折叠，
@@ -1922,8 +2240,179 @@ class JsonPrismDeckApp {
    */
   isNodeLockedByPreviewSearch(nodeId) {
     return this.state.searchTarget === "preview"
-      && Boolean(this.state.searchQuery.trim())
+      && Boolean(this.searchPlan.query)
       && this.state.autoExpandedIds.has(nodeId);
+  }
+
+  /**
+   * 判断节点关闭行后是否需要保留尾逗号。
+   *
+   * 文本预览折叠后仍然必须保持合法 JSON 语法形态；
+   * 因此对象/数组在兄弟列表里不是最后一项时，折叠成单行或显示关闭括号时都要补回原本的逗号。
+   *
+   * @param {string} nodeId 节点 id。
+   * @return {boolean} 是否需要尾逗号。
+   */
+  hasTrailingComma(nodeId) {
+    const node = this.nodeMap.get(nodeId);
+
+    if (!node?.parentId) {
+      return false;
+    }
+
+    const parent = this.nodeMap.get(node.parentId);
+
+    if (!parent) {
+      return false;
+    }
+
+    return parent.childIds[parent.childIds.length - 1] !== nodeId;
+  }
+
+  /**
+   * 生成容器节点折叠后的单行文案。
+   *
+   * 折叠文本视图时，用户看到的应该仍然接近真实 JSON 代码；
+   * 所以这里优先复用完整格式化文本的开行前缀，只把末尾的开括号替换成 `{ ... }` 或 `[ ... ]`，
+   * 这样缩进、键名和冒号都与展开前完全一致。
+   *
+   * @param {any} node 节点模型。
+   * @param {string} openLine 容器展开时的首行。
+   * @param {string} closeLine 容器展开时的尾行。
+   * @return {string} 折叠后的单行文案。
+   */
+  buildCollapsedTextLine(node, openLine, closeLine) {
+    const opener = node.type === "array" ? "[" : "{";
+    const closer = node.type === "array" ? "]" : "}";
+    const prefix = openLine.endsWith(opener) ? openLine.slice(0, -1) : openLine;
+    const trailingComma = closeLine.trimEnd().endsWith(",") ? "," : "";
+    return `${prefix}${opener} ... ${closer}${trailingComma}`;
+  }
+
+  /**
+   * 构建文本预览的可见代码行。
+   *
+   * 文本预览本质上是“带折叠能力的 pretty-print 代码视图”：
+   * 展开时直接复用完整格式化文本的开行/收行，折叠时把容器中间区间压缩成单行占位，从而同时兼顾代码保真和交互折叠。
+   *
+   * @return {Array<{
+   *   lineNumber: number,
+   *   nodeId: string | null,
+   *   text: string,
+   *   meta: string,
+   *   isMatch: boolean,
+   *   isCurrentMatch: boolean,
+   *   isSelected: boolean,
+   *   isToggleRow: boolean,
+   *   expanded: boolean
+   * }>} 可见代码行模型。
+   */
+  buildVisibleTextRows() {
+    if (!this.state.valid || !this.nodeMap.has(this.state.rootId)) {
+      return [];
+    }
+
+    const lines = this.state.formattedText.length === 0 ? [""] : this.state.formattedText.split("\n");
+    const rows = [];
+    const matchIds = new Set(this.state.searchMatches);
+    const currentMatchId = this.state.searchTarget === "preview" ? (this.state.searchMatches[this.state.currentMatchIndex] || null) : null;
+
+    /**
+     * 追加一行可见代码。
+     *
+     * @param {{
+     *   nodeId: string | null,
+     *   text: string,
+     *   meta?: string,
+     *   isMatch?: boolean,
+     *   isCurrentMatch?: boolean,
+     *   isSelected?: boolean,
+     *   isToggleRow?: boolean,
+     *   expanded?: boolean
+     * }} row 行内容。
+     * @return {void}
+     */
+    const appendRow = (row) => {
+      rows.push({
+        lineNumber: rows.length + 1,
+        nodeId: row.nodeId,
+        text: row.text,
+        meta: row.meta || "",
+        isMatch: Boolean(row.isMatch),
+        isCurrentMatch: Boolean(row.isCurrentMatch),
+        isSelected: Boolean(row.isSelected),
+        isToggleRow: Boolean(row.isToggleRow),
+        expanded: Boolean(row.expanded),
+      });
+    };
+
+    /**
+     * 深度优先产出当前展开状态下的可见代码行。
+     *
+     * @param {string} nodeId 节点 id。
+     * @return {void}
+     */
+    const walkNode = (nodeId) => {
+      const node = this.nodeMap.get(nodeId);
+      const range = this.formattedRangeByPath.get(nodeId);
+
+      if (!node || !range) {
+        return;
+      }
+
+      const isMatch = matchIds.has(node.id);
+      const isCurrentMatch = currentMatchId === node.id;
+      const isSelected = this.state.selectedNodeId === node.id;
+      const openLine = lines[range.startLine - 1] || "";
+      const closeLine = lines[range.endLine - 1] || "";
+      const canToggle = node.expandable && node.childCount > 0;
+
+      if (!canToggle) {
+        appendRow({
+          nodeId: node.id,
+          text: openLine,
+          isMatch,
+          isCurrentMatch,
+          isSelected,
+        });
+        return;
+      }
+
+      if (!this.isNodeExpanded(node.id)) {
+        appendRow({
+          nodeId: node.id,
+          text: this.buildCollapsedTextLine(node, openLine, closeLine),
+          isMatch,
+          isCurrentMatch,
+          isSelected,
+          isToggleRow: true,
+          expanded: false,
+        });
+        return;
+      }
+
+      appendRow({
+        nodeId: node.id,
+        text: openLine,
+        isMatch,
+        isCurrentMatch,
+        isSelected,
+        isToggleRow: true,
+        expanded: true,
+      });
+
+      for (const childId of node.childIds) {
+        walkNode(childId);
+      }
+
+      appendRow({
+        nodeId: null,
+        text: closeLine,
+      });
+    };
+
+    walkNode(this.state.rootId);
+    return rows;
   }
 
   /**
@@ -1954,7 +2443,7 @@ class JsonPrismDeckApp {
         continue;
       }
 
-      const expanded = this.state.expandedIds.has(node.id) || this.state.autoExpandedIds.has(node.id);
+      const expanded = this.isNodeExpanded(node.id);
       rows.push({
         node,
         depth: current.depth,
@@ -2048,7 +2537,7 @@ class JsonPrismDeckApp {
       ? (this.state.editorSearchMatches[this.state.editorCurrentMatchIndex] || null)
       : null;
 
-    if (this.state.searchTarget === "editor" && this.state.searchQuery) {
+    if (this.state.searchTarget === "editor" && this.searchPlan.query && !this.searchPlan.error) {
       for (const match of this.state.editorSearchMatches) {
         const ranges = searchRangesByLine.get(match.lineNumber) || [];
         ranges.push({
@@ -2347,7 +2836,7 @@ class JsonPrismDeckApp {
     }
 
     if (this.state.previewMode === "text") {
-      this.renderRawPreview(this.state.formattedText, null);
+      this.renderTextPreview();
       return;
     }
 
@@ -2361,12 +2850,12 @@ class JsonPrismDeckApp {
    */
   renderTreePreview() {
     const rows = this.buildVisibleTreeRows();
-    const query = this.state.searchTarget === "preview" ? this.state.searchQuery.trim() : "";
+    const searchPlan = this.state.searchTarget === "preview" ? this.searchPlan : null;
 
     this.previewList.setConfig({
       rowHeight: this.getTreeRowHeight(),
       emptyMessage: "当前没有可见节点。",
-      renderRow: (item, index) => this.renderTreeRow(item, query, index),
+      renderRow: (item, index) => this.renderTreeRow(item, searchPlan, index),
     });
     this.previewList.setItems(rows);
 
@@ -2386,18 +2875,41 @@ class JsonPrismDeckApp {
    */
   renderRawPreview(text, error) {
     const rows = buildRawRows(text, error);
-    const query = this.state.searchTarget === "preview" ? this.state.searchQuery.trim() : "";
+    const searchPlan = this.state.searchTarget === "preview" ? this.searchPlan : null;
 
     this.previewList.setConfig({
       rowHeight: this.getRawRowHeight(),
       emptyMessage: "当前没有文本内容。",
-      renderRow: (item) => this.renderRawRow(item, query),
+      renderRow: (item) => this.renderRawRow(item, searchPlan),
     });
     this.previewList.setItems(rows);
 
     if (this.pendingScroll?.mode === "error") {
       this.previewList.scrollToIndex(this.pendingScroll.index);
       this.pendingScroll = null;
+    }
+  }
+
+  /**
+   * 渲染支持折叠的文本预览。
+   *
+   * @return {void}
+   */
+  renderTextPreview() {
+    const rows = this.buildVisibleTextRows();
+    const searchPlan = this.state.searchTarget === "preview" ? this.searchPlan : null;
+
+    this.previewList.setConfig({
+      rowHeight: this.getRawRowHeight(),
+      emptyMessage: "当前没有文本内容。",
+      renderRow: (item) => this.renderTextPreviewRow(item, searchPlan),
+    });
+    this.previewList.setItems(rows);
+
+    const selectedIndex = rows.findIndex((row) => row.nodeId === this.state.selectedNodeId);
+
+    if (selectedIndex !== -1 && this.state.searchMatches.length > 0) {
+      this.previewList.scrollToIndex(selectedIndex);
     }
   }
 
@@ -2443,11 +2955,11 @@ class JsonPrismDeckApp {
    * 创建一行树节点。
    *
    * @param {{ node: any, depth: number, expanded: boolean, isMatch: boolean, isSelected: boolean }} row 行数据。
-   * @param {string} query 当前搜索词。
+   * @param {SearchPlan | null} searchPlan 当前搜索计划。
    * @param {number} index 当前可见行序号，从 0 开始。
    * @return {HTMLElement} 行元素。
    */
-  renderTreeRow(row, query, index) {
+  renderTreeRow(row, searchPlan, index) {
     const element = document.createElement("div");
     element.className = "preview-row tree-row";
     element.dataset.nodeId = row.node.id;
@@ -2493,7 +3005,7 @@ class JsonPrismDeckApp {
 
     const key = document.createElement("span");
     key.className = "tree-key";
-    key.append(buildHighlightedFragment(row.node.keyLabel, query));
+    key.append(buildHighlightedFragment(row.node.keyLabel, searchPlan));
 
     const value = document.createElement("span");
     value.className = "tree-value";
@@ -2520,12 +3032,12 @@ class JsonPrismDeckApp {
       value.append(close);
     } else {
       value.classList.add(`syntax-value-${row.node.type === "null" ? "null" : row.node.type}`);
-      value.append(buildHighlightedFragment(row.node.preview, query));
+      value.append(buildHighlightedFragment(row.node.preview, searchPlan));
     }
 
     const path = document.createElement("span");
     path.className = "tree-path";
-    path.append(buildHighlightedFragment(row.node.path, query));
+    path.append(buildHighlightedFragment(row.node.path, searchPlan));
 
     content.append(toggle);
 
@@ -2551,13 +3063,13 @@ class JsonPrismDeckApp {
    * 创建一行文本预览。
    *
    * @param {{ lineNumber: number, text: string, isError: boolean, errorColumn: number | null, meta: string }} row 行数据。
-   * @param {string} query 当前搜索词。
+   * @param {SearchPlan | null} searchPlan 当前搜索计划。
    * @return {HTMLElement} 行元素。
    */
-  renderRawRow(row, query) {
+  renderRawRow(row, searchPlan) {
     const element = document.createElement("div");
     element.className = "preview-row raw-row";
-    const searchRanges = buildSearchRanges(row.text, query);
+    const searchRanges = buildSearchRanges(row.text, searchPlan);
 
     if (row.isError) {
       element.classList.add("is-error");
@@ -2571,15 +3083,101 @@ class JsonPrismDeckApp {
     number.className = "raw-line-number";
     number.textContent = String(row.lineNumber);
 
+    const toggleSlot = document.createElement("div");
+    toggleSlot.className = "raw-line-toggle-slot";
+    toggleSlot.setAttribute("aria-hidden", "true");
+
     const code = document.createElement("div");
     code.className = "raw-line-code";
-    code.append(buildJsonSyntaxFragment(row.text, row.errorColumn, searchRanges));
+    const content = document.createElement("span");
+    content.className = "raw-line-content";
+    content.append(buildJsonSyntaxFragment(row.text, row.errorColumn, searchRanges));
+    code.append(content);
 
     const meta = document.createElement("div");
     meta.className = "raw-line-meta";
     meta.textContent = row.meta;
 
-    element.append(number, code, meta);
+    element.append(number, toggleSlot, code, meta);
+    return element;
+  }
+
+  /**
+   * 渲染文本预览中的一行代码。
+   *
+   * @param {{
+   *   lineNumber: number,
+   *   nodeId: string | null,
+   *   text: string,
+   *   meta: string,
+   *   isMatch: boolean,
+   *   isCurrentMatch: boolean,
+   *   isSelected: boolean,
+   *   isToggleRow: boolean,
+   *   expanded: boolean
+   * }} row 行数据。
+   * @param {SearchPlan | null} searchPlan 当前搜索计划。
+   * @return {HTMLElement} 行元素。
+   */
+  renderTextPreviewRow(row, searchPlan) {
+    const element = document.createElement("div");
+    element.className = "preview-row raw-row";
+    const searchRanges = buildSearchRanges(row.text, searchPlan);
+
+    if (row.nodeId) {
+      element.dataset.nodeId = row.nodeId;
+    }
+
+    if (row.isMatch || searchRanges.length > 0) {
+      element.classList.add("is-search-match");
+    }
+
+    if (row.isCurrentMatch) {
+      element.classList.add("is-search-current");
+    }
+
+    if (row.isSelected) {
+      element.classList.add("is-selected");
+    }
+
+    const number = document.createElement("div");
+    number.className = "raw-line-number";
+    number.textContent = String(row.lineNumber);
+
+    const toggleSlot = document.createElement("div");
+    toggleSlot.className = "raw-line-toggle-slot";
+
+    const code = document.createElement("div");
+    code.className = "raw-line-code";
+
+    if (row.isToggleRow && row.nodeId) {
+      const toggle = document.createElement("button");
+      toggle.className = "tree-toggle raw-line-toggle";
+      toggle.type = "button";
+      toggle.dataset.action = "toggle";
+      toggle.dataset.nodeId = row.nodeId;
+      toggle.textContent = row.expanded ? "▾" : "▸";
+
+      if (this.isNodeLockedByPreviewSearch(row.nodeId)) {
+        toggle.classList.add("is-search-locked");
+        toggle.title = "当前节点下有搜索命中，清空搜索后才能折叠";
+      }
+
+      // 折叠箭头必须放在独立列里，代码列只保留 JSON 文本；
+      // 否则按钮会吞掉原始缩进宽度，导致父节点行看起来比子节点更靠右。
+      toggleSlot.append(toggle);
+    }
+
+    const content = document.createElement("span");
+    content.className = "raw-line-content";
+    content.append(buildJsonSyntaxFragment(row.text, null, searchRanges));
+    code.append(content);
+
+    const meta = document.createElement("div");
+    meta.className = "raw-line-meta";
+    meta.textContent = row.meta;
+
+    element.append(number, toggleSlot, code, meta);
     return element;
   }
 
@@ -2591,6 +3189,11 @@ class JsonPrismDeckApp {
   renderPreviewState() {
     if (this.noticeText) {
       this.refs.previewState.textContent = this.noticeText;
+      return;
+    }
+
+    if (this.searchPlan.error) {
+      this.refs.previewState.textContent = `搜索表达式无效：${this.searchPlan.error}`;
       return;
     }
 
@@ -2613,7 +3216,8 @@ class JsonPrismDeckApp {
     }
 
     if (this.state.previewMode === "text") {
-      this.refs.previewState.textContent = `文本预览 · ${formatCount(this.state.metadata.formattedLines)} 行 · 按 ${this.getSortLabel(this.state.sortMode)} 展示。`;
+      const visible = this.buildVisibleTextRows().length;
+      this.refs.previewState.textContent = `文本预览 · 可见代码行 ${formatCount(visible)} / 完整 ${formatCount(this.state.metadata.formattedLines)} 行 · 支持折叠/展开。`;
       return;
     }
 
@@ -2628,7 +3232,7 @@ class JsonPrismDeckApp {
   updateActionAvailability() {
     const hasText = this.refs.jsonEditor.value.trim().length > 0;
     const hasValidJson = this.state.valid;
-    const treeMode = hasValidJson && this.state.previewMode === "tree";
+    const structuredPreviewMode = hasValidJson && (this.state.previewMode === "tree" || this.state.previewMode === "text");
     const matchCount = this.getActiveSearchMatchCount();
 
     this.refs.formatBtn.disabled = !hasValidJson;
@@ -2636,8 +3240,8 @@ class JsonPrismDeckApp {
     this.refs.sortFormatBtn.disabled = !hasValidJson;
     this.refs.copyBtn.disabled = !hasText;
     this.refs.downloadBtn.disabled = !hasText;
-    this.refs.expandAllBtn.disabled = !treeMode;
-    this.refs.collapseAllBtn.disabled = !treeMode;
+    this.refs.expandAllBtn.disabled = !structuredPreviewMode;
+    this.refs.collapseAllBtn.disabled = !structuredPreviewMode;
     this.refs.copyPathBtn.disabled = !hasValidJson;
     this.refs.copyValueBtn.disabled = !hasValidJson;
     this.refs.searchPrevBtn.disabled = matchCount === 0;
