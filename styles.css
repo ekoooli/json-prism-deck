@@ -391,6 +391,27 @@ input[type="search"] {
   letter-spacing: 0.01em;
 }
 
+/* VS Code 的 whole word 图标不是字面量 `ab_`，而是 `ab` 下方一条装饰线；
+ * 这里用独立 span 画线，避免下划线字符本身参与文字布局后显得又脏又挤。 */
+.search-option-whole-word-label {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+}
+
+.search-option-whole-word-label::after {
+  content: "";
+  position: absolute;
+  left: -1px;
+  right: -1px;
+  bottom: -2px;
+  height: 1.5px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.92;
+}
+
 .tool-btn:hover,
 .segment-btn:hover,
 .icon-btn:hover,
