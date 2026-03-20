@@ -1869,12 +1869,18 @@ class JsonPrismDeckApp {
     this.refs.expandAllBtn.addEventListener("click", () => {
       this.state.expandedIds = new Set(this.state.expandableIds);
       this.state.hasCustomExpansion = true;
+      // 结构化预览的可见行会复用缓存；批量展开后如果不先失效缓存，
+      // `renderPreview()` 仍会吃到旧的折叠树，用户就会看到“按钮点了但界面没变化”。
+      this.invalidateStructuredPreviewCaches();
       this.renderPreview();
     });
 
     this.refs.collapseAllBtn.addEventListener("click", () => {
       this.state.expandedIds = new Set();
       this.state.hasCustomExpansion = true;
+      // 折叠全部和展开全部共享同一份可见行缓存约束；
+      // 这里同样必须先清掉缓存，确保整棵树按新的展开态重建。
+      this.invalidateStructuredPreviewCaches();
       this.renderPreview();
     });
 
