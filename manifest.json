@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "JSON Prism Deck",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "本地离线 JSON 格式化、压缩、树形预览与元数据分析工作台。",
   "permissions": [
     "clipboardWrite"

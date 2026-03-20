@@ -3,7 +3,7 @@ const STORAGE_KEY = "json-prism-deck-state";
 const DEFAULT_SAMPLE_TEXT = `{
   "workspace": {
     "name": "JSON Prism Deck",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "features": [
       "tree-preview",
       "virtual-scroll",
@@ -54,6 +54,7 @@ const DEFAULT_SETTINGS = {
   searchCaseSensitive: false,
   searchWholeWord: false,
   searchRegex: false,
+  editorMode: "full",
   editorFontSize: 15,
   previewFontSize: 14,
 };
@@ -78,6 +79,8 @@ const LARGE_FILE_LIMITS = {
   bytes: 1024 * 1024,
   parseDelay: 480,
 };
+
+const LARGE_PREVIEW_SEARCH_DELAY = 180;
 
 /**
  * JSON 文本搜索的开关集合。
@@ -334,6 +337,39 @@ function hasSearchMatch(text, searchPlan) {
     match = expression.exec(text);
   }
 
+  return false;
+}
+
+/**
+ * 复用同一个正则实例判断文本是否存在至少一个可见命中。
+ *
+ * 预览搜索会对每个节点的 `searchText` 跑一遍匹配；
+ * 如果每个节点都重新 clone 一份 RegExp，10w 级节点下对象分配本身就会成为明显负担。
+ * 这里统一复用同一个正则，并在每次判断前显式重置 `lastIndex`，把成本压回纯文本扫描。
+ *
+ * @param {string} text 原始文本。
+ * @param {RegExp | null} expression 可复用正则。
+ * @return {boolean} 是否存在可见命中。
+ */
+function hasSearchMatchWithExpression(text, expression) {
+  if (!text || !expression) {
+    return false;
+  }
+
+  expression.lastIndex = 0;
+  let match = expression.exec(text);
+
+  while (match) {
+    if (match[0]) {
+      expression.lastIndex = 0;
+      return true;
+    }
+
+    expression.lastIndex = match.index + 1;
+    match = expression.exec(text);
+  }
+
+  expression.lastIndex = 0;
   return false;
 }
 
@@ -1240,6 +1276,10 @@ class JsonPrismDeckApp {
     /** @type {number | null} */
     this.editorRefreshId = null;
     /** @type {number | null} */
+    this.editorRefreshTimer = null;
+    /** @type {number | null} */
+    this.previewSearchTimer = null;
+    /** @type {number | null} */
     this.noticeTimer = null;
     /** @type {string | null} */
     this.noticeText = null;
@@ -1259,6 +1299,28 @@ class JsonPrismDeckApp {
     this.nodeMap = new Map();
     /** @type {Map<string, { startLine: number, endLine: number }>} */
     this.formattedRangeByPath = new Map();
+    /** @type {Set<string>} */
+    this.searchMatchIdSet = new Set();
+    /** @type {Array<
+     *   | { kind: "node", nodeId: string, depth: number, expanded: boolean }
+     *   | { kind: "tail" }
+     * > | null} */
+    this.treeRowsCache = null;
+    /** @type {Map<string, number>} */
+    this.treeRowIndexByNodeId = new Map();
+    /** @type {Array<{
+     *   lineNumber: number,
+     *   nodeId: string | null,
+     *   text: string,
+     *   meta: string,
+     *   isToggleRow: boolean,
+     *   expanded: boolean
+     * }> | null} */
+    this.textRowsCache = null;
+    /** @type {Map<string, number>} */
+    this.textRowIndexByNodeId = new Map();
+    /** @type {boolean} */
+    this.forceExpandOnNextValidParse = false;
     /** @type {{ lines: number, bytes: number, isLarge: boolean }} */
     this.editorScale = measureTextScale(DEFAULT_SETTINGS.text);
 
@@ -1267,7 +1329,10 @@ class JsonPrismDeckApp {
       valid: false,
       empty: false,
       isProcessing: false,
+      isEditorBusy: false,
       isLargeFileMode: false,
+      isPreviewSearchPending: false,
+      editorBusyReason: "",
       metadata: null,
       error: null,
       nodes: [],
@@ -1296,12 +1361,17 @@ class JsonPrismDeckApp {
       editorSyntax: /** @type {HTMLElement} */ (getRequiredElement("editorSyntax")),
       lineNumbers: /** @type {HTMLElement} */ (getRequiredElement("lineNumbers")),
       editorDropzone: /** @type {HTMLElement} */ (getRequiredElement("editorDropzone")),
+      editorBusyMask: /** @type {HTMLElement} */ (getRequiredElement("editorBusyMask")),
+      editorBusyTitle: /** @type {HTMLElement} */ (getRequiredElement("editorBusyTitle")),
+      editorBusyDetail: /** @type {HTMLElement} */ (getRequiredElement("editorBusyDetail")),
       fileInput: /** @type {HTMLInputElement} */ (getRequiredElement("fileInput")),
       previewContent: /** @type {HTMLElement} */ (getRequiredElement("previewContent")),
       previewState: /** @type {HTMLElement} */ (getRequiredElement("previewState")),
       summaryChips: /** @type {HTMLElement} */ (getRequiredElement("summaryChips")),
       searchTargetSelect: /** @type {HTMLSelectElement} */ (getRequiredElement("searchTargetSelect")),
       searchInput: /** @type {HTMLInputElement} */ (getRequiredElement("searchInput")),
+      editorModeFullBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("editorModeFullBtn")),
+      editorModeLiteBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("editorModeLiteBtn")),
       searchCaseBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("searchCaseBtn")),
       searchWholeWordBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("searchWholeWordBtn")),
       searchRegexBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("searchRegexBtn")),
@@ -1359,6 +1429,8 @@ class JsonPrismDeckApp {
 
     this.applyLayout(this.state.layout);
     this.applyTheme(this.state.theme);
+    this.applyEditorMode(this.state.editorMode);
+    this.renderEditorBusyState();
     this.applyPreviewModeButtons();
     this.refreshSearchPlan();
     this.renderSearchTargetControl();
@@ -1425,12 +1497,138 @@ class JsonPrismDeckApp {
    * @return {void}
    */
   cancelScheduledEditorRefresh() {
-    if (this.editorRefreshId === null) {
+    if (this.editorRefreshId !== null) {
+      window.cancelAnimationFrame(this.editorRefreshId);
+      this.editorRefreshId = null;
+    }
+
+    if (this.editorRefreshTimer !== null) {
+      window.clearTimeout(this.editorRefreshTimer);
+      this.editorRefreshTimer = null;
+    }
+  }
+
+  /**
+   * 取消已排队的预览搜索任务。
+   *
+   * @return {void}
+   */
+  cancelScheduledPreviewSearch() {
+    if (this.previewSearchTimer === null) {
       return;
     }
 
-    window.cancelAnimationFrame(this.editorRefreshId);
-    this.editorRefreshId = null;
+    window.clearTimeout(this.previewSearchTimer);
+    this.previewSearchTimer = null;
+  }
+
+  /**
+   * 让结构化预览的缓存失效。
+   *
+   * 树形与文本预览都会根据“节点结构 + 展开状态 + 搜索自动展开”生成可见行；
+   * 一旦这些前提变化，旧缓存就不能再复用，否则跳匹配时会滚到错误位置或继续显示过期层级。
+   *
+   * @return {void}
+   */
+  invalidateStructuredPreviewCaches() {
+    this.treeRowsCache = null;
+    this.treeRowIndexByNodeId = new Map();
+    this.textRowsCache = null;
+    this.textRowIndexByNodeId = new Map();
+  }
+
+  /**
+   * 判断当前预览搜索是否值得延后计算。
+   *
+   * 小数据下立即搜索反馈最好；只有当节点量已经大到会拖慢输入时，才切到延后调度模式。
+   *
+   * @return {boolean} 是否延后预览搜索。
+   */
+  shouldDeferPreviewSearch() {
+    return this.state.searchTarget === "preview"
+      && this.state.valid
+      && this.state.isLargeFileMode
+      && Boolean(this.searchPlan.query)
+      && !this.searchPlan.error;
+  }
+
+  /**
+   * 执行一次真正的预览搜索刷新。
+   *
+   * @return {void}
+   */
+  applyPreviewSearchRefresh() {
+    this.cancelScheduledPreviewSearch();
+    this.state.isPreviewSearchPending = false;
+    this.updateSearchResults();
+    this.renderSummary();
+    this.renderSelection();
+    this.renderPreview();
+    this.updateActionAvailability();
+  }
+
+  /**
+   * 安排下一次预览搜索刷新。
+   *
+   * @return {void}
+   */
+  schedulePreviewSearchRefresh() {
+    this.cancelScheduledPreviewSearch();
+    this.state.isPreviewSearchPending = true;
+    this.renderSummary();
+    this.renderPreviewState();
+    this.updateActionAvailability();
+    this.previewSearchTimer = window.setTimeout(() => {
+      this.previewSearchTimer = null;
+      this.applyPreviewSearchRefresh();
+    }, LARGE_PREVIEW_SEARCH_DELAY);
+  }
+
+  /**
+   * 立即落地当前已排队的预览搜索。
+   *
+   * 回车、上下匹配导航都不应该继续消费上一轮旧结果；
+   * 因此如果用户在延后窗口内直接导航，这里会先把最新搜索结果算出来，再执行跳转。
+   *
+   * @return {boolean} 是否处理了一次待执行搜索。
+   */
+  resolvePendingPreviewSearchNow() {
+    if (!this.state.isPreviewSearchPending) {
+      return false;
+    }
+
+    this.applyPreviewSearchRefresh();
+    return true;
+  }
+
+  /**
+   * 刷新结构化预览的可见区并滚到当前选中节点。
+   *
+   * 搜索上下跳只会改“当前节点 / 当前命中”，不会改树结构；
+   * 这时只需要让虚拟列表重绘当前窗口，并滚到缓存好的行索引，没必要整棵树重建一遍。
+   *
+   * @return {void}
+   */
+  refreshStructuredPreviewSelection() {
+    this.previewList.scheduleRender();
+
+    if (this.state.previewMode === "tree") {
+      const index = this.treeRowIndexByNodeId.get(this.state.selectedNodeId);
+
+      if (typeof index === "number") {
+        this.previewList.scrollToIndex(index);
+      }
+
+      return;
+    }
+
+    if (this.state.previewMode === "text") {
+      const index = this.textRowIndexByNodeId.get(this.state.selectedNodeId);
+
+      if (typeof index === "number") {
+        this.previewList.scrollToIndex(index);
+      }
+    }
   }
 
   /**
@@ -1446,6 +1644,14 @@ class JsonPrismDeckApp {
       this.updateEditorSearchResults();
     }
 
+    if (this.state.editorMode === "lite") {
+      this.refs.editorSyntax.replaceChildren();
+      this.refs.editorSyntax.style.transform = "";
+      this.refs.lineNumbers.replaceChildren();
+      this.refreshEditorMetrics();
+      return;
+    }
+
     this.renderEditorSyntax();
     this.renderLineNumbers();
     this.refreshEditorMetrics();
@@ -1454,23 +1660,108 @@ class JsonPrismDeckApp {
   /**
    * 安排编辑区附属视图刷新。
    *
+   * 大文件完整模式下，这一步会创建大量高亮和行号 DOM；
+   * 因此延后分支必须先让 busy mask 有机会进屏，再把重活放进下一轮 macrotask，避免用户只感知到“卡住”。
+   *
    * @param {boolean} defer 是否延后到下一帧。
+   * @param {(() => void) | null} [afterRefresh] 刷新完成后的收尾动作。
    * @return {void}
    */
-  scheduleEditorAssistiveRefresh(defer) {
+  scheduleEditorAssistiveRefresh(defer, afterRefresh = null) {
     this.cancelScheduledEditorRefresh();
 
     if (!defer) {
       this.refreshEditorAssistiveViews();
+      afterRefresh?.();
       return;
     }
 
     this.editorRefreshId = window.requestAnimationFrame(() => {
       this.editorRefreshId = null;
-      this.refreshEditorAssistiveViews();
-      this.renderSummary();
-      this.updateActionAvailability();
+
+      this.editorRefreshTimer = window.setTimeout(() => {
+        this.editorRefreshTimer = null;
+        this.refreshEditorAssistiveViews();
+        afterRefresh?.();
+        this.renderSummary();
+        this.updateActionAvailability();
+      }, 0);
     });
+  }
+
+  /**
+   * 标记“下一次成功解析后需要恢复全展开”。
+   *
+   * 旧版本会把手动折叠状态跨数据继承，只靠 path 过滤掉不存在的节点；
+   * 一旦新旧 JSON 的路径恰好还能对上，就会出现“刚贴进新数据却还是沿用上一次折叠态”的混乱体验。
+   *
+   * @return {void}
+   */
+  requestExpansionResetOnNextValidParse() {
+    this.forceExpandOnNextValidParse = true;
+  }
+
+  /**
+   * 应用编辑区模式。
+   *
+   * 精简模式的目标是尽量保留原生 textarea 的性能上限，因此这里统一把视觉状态投射到容器 data 属性，
+   * 让样式层决定是否隐藏语法镜像和行号；业务层只关心当前模式是什么。
+   *
+   * @param {"full" | "lite"} mode 编辑区模式。
+   * @return {void}
+   */
+  applyEditorMode(mode) {
+    this.state.editorMode = mode === "lite" ? "lite" : "full";
+    this.refs.editorDropzone.dataset.editorMode = this.state.editorMode;
+    this.renderEditorModeControls();
+  }
+
+  /**
+   * 渲染编辑区模式按钮状态。
+   *
+   * @return {void}
+   */
+  renderEditorModeControls() {
+    this.refs.editorModeFullBtn.classList.toggle("is-active", this.state.editorMode === "full");
+    this.refs.editorModeLiteBtn.classList.toggle("is-active", this.state.editorMode === "lite");
+    this.refs.editorModeFullBtn.disabled = this.state.isEditorBusy;
+    this.refs.editorModeLiteBtn.disabled = this.state.isEditorBusy;
+  }
+
+  /**
+   * 切换编辑区独立忙碌态。
+   *
+   * 这里故意不复用预览区的 `isProcessing`：
+   * 完整模式大文件 paste 和 lite -> full 切换的卡顿，根因是编辑区高亮/行号 DOM 重建，而不是 worker parse。
+   * 单独拆状态后，预览仍可维持自己的解析进度文案，编辑区则负责解释“为什么这一块暂时不可操作”。
+   *
+   * @param {boolean} isBusy 是否忙碌。
+   * @param {string} [reason] 忙碌原因。
+   * @return {void}
+   */
+  setEditorBusyState(isBusy, reason = "") {
+    this.state.isEditorBusy = isBusy;
+    this.state.editorBusyReason = isBusy ? reason : "";
+    this.renderEditorBusyState();
+    this.renderEditorModeControls();
+  }
+
+  /**
+   * 渲染编辑区 busy mask。
+   *
+   * @return {void}
+   */
+  renderEditorBusyState() {
+    const isBusy = this.state.isEditorBusy;
+    const detail = isBusy && this.state.isLargeFileMode
+      ? `${formatCount(this.editorScale.lines)} 行 · ${formatBytes(this.editorScale.bytes)} · 完整模式准备好后会自动恢复可编辑。`
+      : "";
+
+    this.refs.editorDropzone.classList.toggle("is-busy", isBusy);
+    this.refs.editorBusyMask.classList.toggle("is-visible", isBusy);
+    this.refs.editorBusyMask.setAttribute("aria-hidden", isBusy ? "false" : "true");
+    this.refs.editorBusyTitle.textContent = isBusy ? (this.state.editorBusyReason || "正在处理编辑区…") : "";
+    this.refs.editorBusyDetail.textContent = detail;
   }
 
   /**
@@ -1480,11 +1771,14 @@ class JsonPrismDeckApp {
    */
   bindEvents() {
     this.refs.jsonEditor.addEventListener("input", () => this.handleEditorInput());
+    this.refs.jsonEditor.addEventListener("paste", () => this.requestExpansionResetOnNextValidParse());
     this.refs.jsonEditor.addEventListener("scroll", () => {
       this.refs.lineNumbers.scrollTop = this.refs.jsonEditor.scrollTop;
       this.syncEditorSyntaxScroll();
     });
     this.refs.jsonEditor.addEventListener("keydown", (event) => this.handleEditorKeydown(event));
+    this.refs.editorModeFullBtn.addEventListener("click", () => this.handleEditorModeChange("full"));
+    this.refs.editorModeLiteBtn.addEventListener("click", () => this.handleEditorModeChange("lite"));
 
     this.refs.formatBtn.addEventListener("click", () => void this.applyStringify("pretty", "source"));
     this.refs.minifyBtn.addEventListener("click", () => void this.applyStringify("minify", "source"));
@@ -1492,8 +1786,8 @@ class JsonPrismDeckApp {
     this.refs.copyBtn.addEventListener("click", () => void this.copyText(this.refs.jsonEditor.value, "已复制编辑区 JSON。"));
     this.refs.downloadBtn.addEventListener("click", () => this.downloadEditorText());
     this.refs.importBtn.addEventListener("click", () => this.refs.fileInput.click());
-    this.refs.clearBtn.addEventListener("click", () => this.replaceEditorText(""));
-    this.refs.sampleBtn.addEventListener("click", () => this.replaceEditorText(DEFAULT_SAMPLE_TEXT));
+    this.refs.clearBtn.addEventListener("click", () => this.replaceEditorText("", { resetExpansion: true }));
+    this.refs.sampleBtn.addEventListener("click", () => this.replaceEditorText(DEFAULT_SAMPLE_TEXT, { resetExpansion: true }));
 
     this.refs.indentSelect.addEventListener("change", () => {
       this.state.indent = Number(this.refs.indentSelect.value);
@@ -1588,6 +1882,16 @@ class JsonPrismDeckApp {
       this.state.searchQuery = this.refs.searchInput.value;
       this.handleSearchCriteriaChange();
     });
+    this.refs.searchInput.addEventListener("keydown", (event) => {
+      // 中文输入法确认候选词时也会冒出 Enter；
+      // 这里只在非组合输入阶段接管它，保证“按回车跳下一个匹配”不会打断正常录入。
+      if (event.key !== "Enter" || event.isComposing) {
+        return;
+      }
+
+      event.preventDefault();
+      this.navigateSearch(event.shiftKey ? -1 : 1);
+    });
 
     this.refs.searchNextBtn.addEventListener("click", () => this.navigateSearch(1));
     this.refs.searchPrevBtn.addEventListener("click", () => this.navigateSearch(-1));
@@ -1661,6 +1965,7 @@ class JsonPrismDeckApp {
     this.state.searchCaseSensitive = Boolean(stored.searchCaseSensitive);
     this.state.searchWholeWord = Boolean(stored.searchWholeWord);
     this.state.searchRegex = Boolean(stored.searchRegex);
+    this.state.editorMode = stored.editorMode === "lite" ? "lite" : "full";
     this.state.editorFontSize = clamp(Number(stored.editorFontSize) || DEFAULT_SETTINGS.editorFontSize, FONT_LIMITS.editor.min, FONT_LIMITS.editor.max);
     this.state.previewFontSize = clamp(Number(stored.previewFontSize) || DEFAULT_SETTINGS.previewFontSize, FONT_LIMITS.preview.min, FONT_LIMITS.preview.max);
   }
@@ -1683,9 +1988,43 @@ class JsonPrismDeckApp {
       searchCaseSensitive: this.state.searchCaseSensitive,
       searchWholeWord: this.state.searchWholeWord,
       searchRegex: this.state.searchRegex,
+      editorMode: this.state.editorMode,
       editorFontSize: this.state.editorFontSize,
       previewFontSize: this.state.previewFontSize,
     });
+  }
+
+  /**
+   * 切换编辑区模式。
+   *
+   * 这是纯展示层切换，不会改动 JSON 文本本身；
+   * 因此切换后只需要重刷编辑区附属视图和按钮状态，不应该触发新的解析任务。
+   *
+   * @param {"full" | "lite"} mode 目标模式。
+   * @return {void}
+   */
+  handleEditorModeChange(mode) {
+    if (mode === this.state.editorMode) {
+      return;
+    }
+
+    const needsBusyOverlay = mode === "full" && this.state.isLargeFileMode;
+    this.applyEditorMode(mode);
+
+    if (needsBusyOverlay) {
+      this.setEditorBusyState(true, "正在切换完整模式并重建高亮…");
+      this.renderSummary();
+      this.updateActionAvailability();
+      this.schedulePersist();
+      this.scheduleEditorAssistiveRefresh(true, () => this.setEditorBusyState(false));
+      return;
+    }
+
+    this.setEditorBusyState(false);
+    this.refreshEditorAssistiveViews();
+    this.renderSummary();
+    this.updateActionAvailability();
+    this.schedulePersist();
   }
 
   /**
@@ -1720,19 +2059,36 @@ class JsonPrismDeckApp {
    */
   handleSearchCriteriaChange() {
     this.refreshSearchPlan();
+    this.cancelScheduledPreviewSearch();
 
     if (this.state.searchTarget === "preview") {
-      this.updateSearchResults();
+      if (this.shouldDeferPreviewSearch()) {
+        this.schedulePreviewSearchRefresh();
+      } else {
+        this.state.isPreviewSearchPending = false;
+        this.updateSearchResults();
+      }
     } else {
+      this.state.isPreviewSearchPending = false;
       this.updateEditorSearchResults();
     }
 
     this.renderSearchControls();
     this.renderSummary();
-    this.renderEditorSyntax();
-    this.renderLineNumbers();
+
+    if (this.state.searchTarget === "editor") {
+      this.renderEditorSyntax();
+      this.renderLineNumbers();
+    }
+
     this.renderSelection();
-    this.renderPreview();
+
+    if (!this.state.isPreviewSearchPending) {
+      this.renderPreview();
+    } else {
+      this.renderPreviewState();
+    }
+
     this.updateActionAvailability();
     this.schedulePersist();
   }
@@ -1758,7 +2114,9 @@ class JsonPrismDeckApp {
     this.updateEditorScale(this.state.text);
 
     if (this.state.isLargeFileMode) {
+      const needsBusyOverlay = this.state.editorMode === "full";
       this.state.isProcessing = true;
+      this.setEditorBusyState(needsBusyOverlay, needsBusyOverlay ? "正在为完整模式重建高亮和行号…" : "");
       this.refreshEditorMetrics();
       this.renderHeroMetrics();
       this.renderSummary();
@@ -1766,12 +2124,13 @@ class JsonPrismDeckApp {
       this.renderPreview();
       this.updateActionAvailability();
       this.schedulePersist();
-      this.scheduleEditorAssistiveRefresh(true);
+      this.scheduleEditorAssistiveRefresh(needsBusyOverlay, needsBusyOverlay ? () => this.setEditorBusyState(false) : null);
       this.scheduleParseRefresh();
       return;
     }
 
     this.state.isProcessing = false;
+    this.setEditorBusyState(false);
     this.scheduleEditorAssistiveRefresh(false);
     this.renderHeroMetrics();
     this.renderSummary();
@@ -1816,28 +2175,36 @@ class JsonPrismDeckApp {
    * 用新的文本整体替换编辑区。
    *
    * @param {string} text 新文本。
+   * @param {{ resetExpansion?: boolean }} [options] 是否把这次替换视为“新数据进入”。
    * @return {void}
    */
-  replaceEditorText(text) {
+  replaceEditorText(text, options = {}) {
+    if (options.resetExpansion) {
+      this.requestExpansionResetOnNextValidParse();
+    }
+
     this.refs.jsonEditor.value = text;
     this.state.text = text;
     this.updateEditorScale(text);
 
     if (this.state.isLargeFileMode) {
+      const needsBusyOverlay = this.state.editorMode === "full";
       this.state.isProcessing = true;
+      this.setEditorBusyState(needsBusyOverlay, needsBusyOverlay ? "正在载入大文件并准备完整模式视图…" : "");
       this.refreshEditorMetrics();
       this.renderHeroMetrics();
       this.renderSummary();
       this.renderSelection();
       this.renderPreview();
       this.updateActionAvailability();
-      this.scheduleEditorAssistiveRefresh(true);
+      this.scheduleEditorAssistiveRefresh(needsBusyOverlay, needsBusyOverlay ? () => this.setEditorBusyState(false) : null);
       this.scheduleParseRefresh();
       this.schedulePersist();
       return;
     }
 
     this.state.isProcessing = false;
+    this.setEditorBusyState(false);
     this.scheduleEditorAssistiveRefresh(false);
     this.renderHeroMetrics();
     this.renderSummary();
@@ -1855,7 +2222,7 @@ class JsonPrismDeckApp {
    */
   async importFile(file) {
     const text = await file.text();
-    this.replaceEditorText(text);
+    this.replaceEditorText(text, { resetExpansion: true });
     this.pushNotice(`已导入 ${file.name}`);
   }
 
@@ -1866,6 +2233,8 @@ class JsonPrismDeckApp {
    */
   async refreshJsonState() {
     this.cancelScheduledParse();
+    this.cancelScheduledPreviewSearch();
+    this.state.isPreviewSearchPending = false;
     this.state.text = this.refs.jsonEditor.value;
     this.updateEditorScale(this.state.text);
     const text = this.state.text;
@@ -1939,8 +2308,10 @@ class JsonPrismDeckApp {
    */
   applyValidResult(result) {
     const hadValidTree = this.state.valid && this.state.nodes.length > 0;
+    const shouldResetExpansion = this.forceExpandOnNextValidParse || !hadValidTree || !this.state.hasCustomExpansion;
 
     this.state.isProcessing = false;
+    this.state.isPreviewSearchPending = false;
     this.state.valid = true;
     this.state.empty = false;
     this.state.error = null;
@@ -1951,10 +2322,13 @@ class JsonPrismDeckApp {
     this.state.expandableIds = new Set(result.expandableIds);
     this.nodeMap = new Map(result.nodes.map((node) => [node.id, node]));
     this.rebuildFormattedRangeIndex();
+    this.invalidateStructuredPreviewCaches();
 
-    if (!hadValidTree || !this.state.hasCustomExpansion) {
-      // 首次得到合法 JSON 时默认全部展开，满足“先看全貌，再按需收起”的浏览习惯。
+    if (shouldResetExpansion) {
+      // 首次得到合法 JSON，或者这次明确来自“贴新数据/导入新数据”时，都回到全展开初始态；
+      // 否则用户会看到上一份 JSON 残留的折叠状态，被误以为新数据不完整。
       this.state.expandedIds = new Set(result.expandableIds);
+      this.state.hasCustomExpansion = false;
     } else {
       this.state.expandedIds = new Set([...this.state.expandedIds].filter((id) => this.state.expandableIds.has(id)));
     }
@@ -1967,6 +2341,7 @@ class JsonPrismDeckApp {
       this.state.selectedNodeId = this.state.rootId;
     }
 
+    this.forceExpandOnNextValidParse = false;
     this.updateSearchResults();
   }
 
@@ -1978,6 +2353,7 @@ class JsonPrismDeckApp {
    */
   applyInvalidResult(result) {
     this.state.isProcessing = false;
+    this.state.isPreviewSearchPending = false;
     this.state.valid = false;
     this.state.empty = false;
     this.state.metadata = result.metadata;
@@ -1990,9 +2366,11 @@ class JsonPrismDeckApp {
     this.state.autoExpandedIds = new Set();
     this.state.searchMatches = [];
     this.state.currentMatchIndex = 0;
+    this.searchMatchIdSet = new Set();
     this.state.selectedNodeId = "$";
     this.nodeMap = new Map();
     this.formattedRangeByPath = new Map();
+    this.invalidateStructuredPreviewCaches();
     this.pendingScroll = result.error?.line ? { mode: "error", index: Math.max(0, result.error.line - 1) } : null;
   }
 
@@ -2004,6 +2382,8 @@ class JsonPrismDeckApp {
   applyEmptyState() {
     this.state.isProcessing = false;
     this.state.isLargeFileMode = false;
+    this.state.isPreviewSearchPending = false;
+    this.forceExpandOnNextValidParse = false;
     this.state.valid = false;
     this.state.empty = true;
     this.state.metadata = {
@@ -2020,9 +2400,11 @@ class JsonPrismDeckApp {
     this.state.autoExpandedIds = new Set();
     this.state.searchMatches = [];
     this.state.currentMatchIndex = 0;
+    this.searchMatchIdSet = new Set();
     this.state.selectedNodeId = "$";
     this.nodeMap = new Map();
     this.formattedRangeByPath = new Map();
+    this.invalidateStructuredPreviewCaches();
     this.pendingScroll = null;
   }
 
@@ -2034,6 +2416,7 @@ class JsonPrismDeckApp {
    */
   applyWorkerFailure(message) {
     this.state.isProcessing = false;
+    this.state.isPreviewSearchPending = false;
     this.state.valid = false;
     this.state.empty = false;
     this.state.error = {
@@ -2057,6 +2440,11 @@ class JsonPrismDeckApp {
         };
     this.nodeMap = new Map();
     this.formattedRangeByPath = new Map();
+    this.state.autoExpandedIds = new Set();
+    this.state.searchMatches = [];
+    this.state.currentMatchIndex = 0;
+    this.searchMatchIdSet = new Set();
+    this.invalidateStructuredPreviewCaches();
   }
 
   /**
@@ -2123,14 +2511,21 @@ class JsonPrismDeckApp {
   updateSearchResults() {
     if (!this.state.valid || !this.searchPlan.query || this.searchPlan.error) {
       this.state.searchMatches = [];
+      this.searchMatchIdSet = new Set();
       this.state.autoExpandedIds = new Set();
       this.state.currentMatchIndex = 0;
+      this.invalidateStructuredPreviewCaches();
       return;
     }
 
-    const matches = this.state.nodes
-      .filter((node) => hasSearchMatch(node.searchText, this.searchPlan))
-      .map((node) => node.id);
+    const matches = [];
+    const expression = cloneSearchExpression(this.searchPlan);
+
+    for (const node of this.state.nodes) {
+      if (hasSearchMatchWithExpression(node.searchText, expression)) {
+        matches.push(node.id);
+      }
+    }
 
     const ancestors = new Set();
 
@@ -2144,7 +2539,9 @@ class JsonPrismDeckApp {
     }
 
     this.state.searchMatches = matches;
+    this.searchMatchIdSet = new Set(matches);
     this.state.autoExpandedIds = ancestors;
+    this.invalidateStructuredPreviewCaches();
 
     if (matches.length === 0) {
       this.state.currentMatchIndex = 0;
@@ -2314,6 +2711,8 @@ class JsonPrismDeckApp {
       return;
     }
 
+    this.resolvePendingPreviewSearchNow();
+
     if (this.state.searchMatches.length === 0) {
       return;
     }
@@ -2322,8 +2721,14 @@ class JsonPrismDeckApp {
     this.state.currentMatchIndex = (this.state.currentMatchIndex + step + length) % length;
     this.state.selectedNodeId = this.state.searchMatches[this.state.currentMatchIndex];
     this.renderSummary();
-    this.renderPreview();
     this.renderSelection();
+
+    if (this.state.previewMode === "tree" || this.state.previewMode === "text") {
+      this.refreshStructuredPreviewSelection();
+      return;
+    }
+
+    this.renderPreview();
   }
 
   /**
@@ -2371,7 +2776,12 @@ class JsonPrismDeckApp {
       if (nodeId && this.nodeMap.has(nodeId)) {
         this.state.selectedNodeId = nodeId;
         this.renderSelection();
-        this.renderPreview();
+
+        if (this.state.previewMode === "tree" || this.state.previewMode === "text") {
+          this.previewList.scheduleRender();
+        } else {
+          this.renderPreview();
+        }
       }
     }
   }
@@ -2421,6 +2831,7 @@ class JsonPrismDeckApp {
       this.state.expandedIds.add(nodeId);
     }
 
+    this.invalidateStructuredPreviewCaches();
     this.renderPreview();
   }
 
@@ -2508,9 +2919,6 @@ class JsonPrismDeckApp {
    *   nodeId: string | null,
    *   text: string,
    *   meta: string,
-   *   isMatch: boolean,
-   *   isCurrentMatch: boolean,
-   *   isSelected: boolean,
    *   isToggleRow: boolean,
    *   expanded: boolean
    * }>} 可见代码行模型。
@@ -2520,10 +2928,13 @@ class JsonPrismDeckApp {
       return [];
     }
 
+    if (this.textRowsCache) {
+      return this.textRowsCache;
+    }
+
     const lines = this.state.formattedText.length === 0 ? [""] : this.state.formattedText.split("\n");
     const rows = [];
-    const matchIds = new Set(this.state.searchMatches);
-    const currentMatchId = this.state.searchTarget === "preview" ? (this.state.searchMatches[this.state.currentMatchIndex] || null) : null;
+    this.textRowIndexByNodeId = new Map();
 
     /**
      * 追加一行可见代码。
@@ -2532,23 +2943,21 @@ class JsonPrismDeckApp {
      *   nodeId: string | null,
      *   text: string,
      *   meta?: string,
-     *   isMatch?: boolean,
-     *   isCurrentMatch?: boolean,
-     *   isSelected?: boolean,
      *   isToggleRow?: boolean,
      *   expanded?: boolean
      * }} row 行内容。
      * @return {void}
      */
     const appendRow = (row) => {
+      if (row.nodeId && !this.textRowIndexByNodeId.has(row.nodeId)) {
+        this.textRowIndexByNodeId.set(row.nodeId, rows.length);
+      }
+
       rows.push({
         lineNumber: rows.length + 1,
         nodeId: row.nodeId,
         text: row.text,
         meta: row.meta || "",
-        isMatch: Boolean(row.isMatch),
-        isCurrentMatch: Boolean(row.isCurrentMatch),
-        isSelected: Boolean(row.isSelected),
         isToggleRow: Boolean(row.isToggleRow),
         expanded: Boolean(row.expanded),
       });
@@ -2568,9 +2977,6 @@ class JsonPrismDeckApp {
         return;
       }
 
-      const isMatch = matchIds.has(node.id);
-      const isCurrentMatch = currentMatchId === node.id;
-      const isSelected = this.state.selectedNodeId === node.id;
       const openLine = lines[range.startLine - 1] || "";
       const closeLine = lines[range.endLine - 1] || "";
       const canToggle = node.expandable && node.childCount > 0;
@@ -2579,9 +2985,6 @@ class JsonPrismDeckApp {
         appendRow({
           nodeId: node.id,
           text: openLine,
-          isMatch,
-          isCurrentMatch,
-          isSelected,
         });
         return;
       }
@@ -2590,9 +2993,6 @@ class JsonPrismDeckApp {
         appendRow({
           nodeId: node.id,
           text: this.buildCollapsedTextLine(node, openLine, closeLine),
-          isMatch,
-          isCurrentMatch,
-          isSelected,
           isToggleRow: true,
           expanded: false,
         });
@@ -2602,9 +3002,6 @@ class JsonPrismDeckApp {
       appendRow({
         nodeId: node.id,
         text: openLine,
-        isMatch,
-        isCurrentMatch,
-        isSelected,
         isToggleRow: true,
         expanded: true,
       });
@@ -2620,6 +3017,7 @@ class JsonPrismDeckApp {
     };
 
     walkNode(this.state.rootId);
+    this.textRowsCache = rows;
     return rows;
   }
 
@@ -2627,7 +3025,7 @@ class JsonPrismDeckApp {
    * 计算当前树形视图的可见行。
    *
    * @return {Array<
-   *   | { kind: "node", node: any, depth: number, expanded: boolean, isMatch: boolean, isSelected: boolean }
+   *   | { kind: "node", nodeId: string, depth: number, expanded: boolean }
    *   | { kind: "tail" }
    * >} 虚拟滚动行。
    */
@@ -2636,11 +3034,16 @@ class JsonPrismDeckApp {
       return [];
     }
 
+    if (this.treeRowsCache) {
+      return this.treeRowsCache;
+    }
+
     /** @type {Array<
-     *   | { kind: "node", node: any, depth: number, expanded: boolean, isMatch: boolean, isSelected: boolean }
+     *   | { kind: "node", nodeId: string, depth: number, expanded: boolean }
      *   | { kind: "tail" }
      * >} */
     const rows = [];
+    this.treeRowIndexByNodeId = new Map();
     /** @type {Array<{ id: string, depth: number }>} */
     const stack = [{ id: this.state.rootId, depth: 0 }];
 
@@ -2658,13 +3061,12 @@ class JsonPrismDeckApp {
       }
 
       const expanded = this.isNodeExpanded(node.id);
+      this.treeRowIndexByNodeId.set(node.id, rows.length);
       rows.push({
         kind: "node",
-        node,
+        nodeId: node.id,
         depth: current.depth,
         expanded,
-        isMatch: this.state.searchMatches.includes(node.id),
-        isSelected: this.state.selectedNodeId === node.id,
       });
 
       if (node.expandable && expanded) {
@@ -2680,6 +3082,7 @@ class JsonPrismDeckApp {
     // 树形视图末尾没有源码收行可参考，尤其大对象下很难肉眼确认“是不是已经到底”；
     // 因此固定补一行尾标，只在真正滚到末尾时出现，作为明确的结束反馈。
     rows.push({ kind: "tail" });
+    this.treeRowsCache = rows;
     return rows;
   }
 
@@ -2692,6 +3095,7 @@ class JsonPrismDeckApp {
     this.cancelScheduledEditorRefresh();
     this.renderFontControls();
     this.refreshEditorAssistiveViews();
+    this.renderEditorBusyState();
     this.renderHeroMetrics();
     this.renderSummary();
     this.renderSelection();
@@ -2702,9 +3106,17 @@ class JsonPrismDeckApp {
   /**
    * 渲染行号，并在错误态强调出错行。
    *
+   * 精简模式故意不生成任何行号 DOM，因为 10w 行量级下，这一列本身就是明显的主线程负担；
+   * 模式切换的目的就是把这部分可选装饰拿掉，让输入链路只剩最必要的 textarea。
+   *
    * @return {void}
    */
   renderLineNumbers() {
+    if (this.state.editorMode === "lite") {
+      this.refs.lineNumbers.replaceChildren();
+      return;
+    }
+
     const lineCount = Math.max(1, this.editorScale.lines);
     const fragment = document.createDocumentFragment();
     const matchedLines = new Set(this.state.searchTarget === "editor" ? this.state.editorSearchMatches.map((match) => match.lineNumber) : []);
@@ -2741,10 +3153,17 @@ class JsonPrismDeckApp {
    *
    * 编辑区仍以 textarea 作为真实输入控件，保证选区、输入法和快捷键行为稳定；
    * 语法层只是镜像文本并提供着色，不参与事件命中，因此不会破坏原生编辑体验。
+   * 精简模式下这里会直接清空镜像层，让浏览器只维护一份真实文本，避免大文本下双份 DOM 同步的额外成本。
    *
    * @return {void}
    */
   renderEditorSyntax() {
+    if (this.state.editorMode === "lite") {
+      this.refs.editorSyntax.replaceChildren();
+      this.refs.editorSyntax.style.transform = "";
+      return;
+    }
+
     const text = this.refs.jsonEditor.value;
     const lines = text.length === 0 ? [""] : text.split("\n");
     const fragment = document.createDocumentFragment();
@@ -2966,6 +3385,10 @@ class JsonPrismDeckApp {
       if (this.state.isLargeFileMode) {
         chips.push({ text: "大文件模式", className: "" });
       }
+    } else if (this.state.isPreviewSearchPending) {
+      chips.push({ text: "搜索更新中", className: "is-warning" });
+      chips.push({ text: `字节 · ${formatBytes(this.editorScale.bytes)}`, className: "" });
+      chips.push({ text: `行数 · ${formatCount(this.editorScale.lines)}`, className: "" });
     } else if (this.state.empty) {
       chips.push({ text: "等待 JSON 输入", className: "" });
     } else if (this.state.valid) {
@@ -3096,9 +3519,9 @@ class JsonPrismDeckApp {
     });
     this.previewList.setItems(rows);
 
-    const selectedIndex = rows.findIndex((row) => row.kind === "node" && row.node.id === this.state.selectedNodeId);
+    const selectedIndex = this.treeRowIndexByNodeId.get(this.state.selectedNodeId);
 
-    if (selectedIndex !== -1 && this.state.searchMatches.length > 0) {
+    if (typeof selectedIndex === "number" && this.state.searchMatches.length > 0) {
       this.previewList.scrollToIndex(selectedIndex);
     }
   }
@@ -3143,9 +3566,9 @@ class JsonPrismDeckApp {
     });
     this.previewList.setItems(rows);
 
-    const selectedIndex = rows.findIndex((row) => row.nodeId === this.state.selectedNodeId);
+    const selectedIndex = this.textRowIndexByNodeId.get(this.state.selectedNodeId);
 
-    if (selectedIndex !== -1 && this.state.searchMatches.length > 0) {
+    if (typeof selectedIndex === "number" && this.state.searchMatches.length > 0) {
       this.previewList.scrollToIndex(selectedIndex);
     }
   }
@@ -3192,7 +3615,7 @@ class JsonPrismDeckApp {
    * 创建一行树节点。
    *
    * @param {
-   *   | { kind: "node", node: any, depth: number, expanded: boolean, isMatch: boolean, isSelected: boolean }
+   *   | { kind: "node", nodeId: string, depth: number, expanded: boolean }
    *   | { kind: "tail" }
    * } row 行数据。
    * @param {SearchPlan | null} searchPlan 当前搜索计划。
@@ -3215,26 +3638,37 @@ class JsonPrismDeckApp {
       return element;
     }
 
+    const node = this.nodeMap.get(row.nodeId);
+
+    if (!node) {
+      const fallback = document.createElement("div");
+      fallback.className = "preview-row tree-row";
+      return fallback;
+    }
+
+    const isMatch = this.state.searchTarget === "preview" && this.searchMatchIdSet.has(node.id);
+    const isSelected = this.state.selectedNodeId === node.id;
+
     const element = document.createElement("div");
     element.className = "preview-row tree-row";
-    element.dataset.nodeId = row.node.id;
+    element.dataset.nodeId = node.id;
 
-    if (row.isSelected) {
+    if (isSelected) {
       element.classList.add("is-selected");
     }
 
-    if (row.isMatch) {
+    if (isMatch) {
       element.classList.add("is-match");
     }
 
     const toggle = document.createElement("button");
     toggle.className = "tree-toggle";
     toggle.type = "button";
-    const isSearchLocked = this.isNodeLockedByPreviewSearch(row.node.id);
+    const isSearchLocked = this.isNodeLockedByPreviewSearch(node.id);
 
-    if (row.node.expandable) {
+    if (node.expandable) {
       toggle.dataset.action = "toggle";
-      toggle.dataset.nodeId = row.node.id;
+      toggle.dataset.nodeId = node.id;
       toggle.textContent = row.expanded ? "▾" : "▸";
 
       if (isSearchLocked) {
@@ -3260,23 +3694,23 @@ class JsonPrismDeckApp {
 
     const key = document.createElement("span");
     key.className = "tree-key";
-    key.append(buildHighlightedFragment(row.node.keyLabel, searchPlan));
+    key.append(buildHighlightedFragment(node.keyLabel, searchPlan));
 
     const value = document.createElement("span");
     value.className = "tree-value";
 
-    if (row.node.expandable) {
+    if (node.expandable) {
       const open = document.createElement("span");
       open.className = "syntax-brace";
-      open.textContent = row.node.type === "array" ? "[" : "{";
+      open.textContent = node.type === "array" ? "[" : "{";
 
       const middle = document.createElement("span");
       middle.className = "tree-summary";
-      middle.textContent = row.node.childCount > 0 ? "…" : "";
+      middle.textContent = node.childCount > 0 ? "…" : "";
 
       const close = document.createElement("span");
       close.className = "syntax-brace";
-      close.textContent = row.node.type === "array" ? "]" : "}";
+      close.textContent = node.type === "array" ? "]" : "}";
 
       value.append(open);
 
@@ -3286,26 +3720,26 @@ class JsonPrismDeckApp {
 
       value.append(close);
     } else {
-      value.classList.add(`syntax-value-${row.node.type === "null" ? "null" : row.node.type}`);
-      value.append(buildHighlightedFragment(row.node.preview, searchPlan));
+      value.classList.add(`syntax-value-${node.type === "null" ? "null" : node.type}`);
+      value.append(buildHighlightedFragment(node.preview, searchPlan));
     }
 
     const path = document.createElement("span");
     path.className = "tree-path";
-    path.append(buildHighlightedFragment(row.node.path, searchPlan));
+    path.append(buildHighlightedFragment(node.path, searchPlan));
 
     content.append(toggle);
 
-    if (row.node.keyLabel) {
+    if (node.keyLabel) {
       content.append(key);
     }
 
     content.append(value);
 
-    if (row.node.expandable && row.node.metaLabel) {
+    if (node.expandable && node.metaLabel) {
       const meta = document.createElement("span");
       meta.className = "meta-pill";
-      meta.textContent = row.node.metaLabel;
+      meta.textContent = node.metaLabel;
       content.append(meta);
     }
 
@@ -3365,9 +3799,6 @@ class JsonPrismDeckApp {
    *   nodeId: string | null,
    *   text: string,
    *   meta: string,
-   *   isMatch: boolean,
-   *   isCurrentMatch: boolean,
-   *   isSelected: boolean,
    *   isToggleRow: boolean,
    *   expanded: boolean
    * }} row 行数据。
@@ -3378,20 +3809,26 @@ class JsonPrismDeckApp {
     const element = document.createElement("div");
     element.className = "preview-row raw-row";
     const searchRanges = buildSearchRanges(row.text, searchPlan);
+    const currentMatchId = this.state.searchTarget === "preview"
+      ? (this.state.searchMatches[this.state.currentMatchIndex] || null)
+      : null;
+    const isMatch = Boolean(this.state.searchTarget === "preview" && row.nodeId && this.searchMatchIdSet.has(row.nodeId));
+    const isCurrentMatch = Boolean(row.nodeId && currentMatchId === row.nodeId);
+    const isSelected = Boolean(row.nodeId && this.state.selectedNodeId === row.nodeId);
 
     if (row.nodeId) {
       element.dataset.nodeId = row.nodeId;
     }
 
-    if (row.isMatch || searchRanges.length > 0) {
+    if (isMatch || searchRanges.length > 0) {
       element.classList.add("is-search-match");
     }
 
-    if (row.isCurrentMatch) {
+    if (isCurrentMatch) {
       element.classList.add("is-search-current");
     }
 
-    if (row.isSelected) {
+    if (isSelected) {
       element.classList.add("is-selected");
     }
 
@@ -3454,6 +3891,13 @@ class JsonPrismDeckApp {
       return;
     }
 
+    if (this.state.isPreviewSearchPending) {
+      this.refs.previewState.textContent = this.state.isLargeFileMode
+        ? "正在更新大文件搜索结果…"
+        : "正在更新搜索结果…";
+      return;
+    }
+
     if (this.searchPlan.error) {
       this.refs.previewState.textContent = `搜索表达式无效：${this.searchPlan.error}`;
       return;
@@ -3494,7 +3938,8 @@ class JsonPrismDeckApp {
   updateActionAvailability() {
     const hasText = this.refs.jsonEditor.value.trim().length > 0;
     const hasValidJson = this.state.valid;
-    const isBusy = this.state.isProcessing;
+    const isBusy = this.state.isProcessing || this.state.isEditorBusy;
+    const searchBusy = this.state.searchTarget === "preview" && this.state.isPreviewSearchPending;
     const structuredPreviewMode = hasValidJson && (this.state.previewMode === "tree" || this.state.previewMode === "text");
     const matchCount = this.getActiveSearchMatchCount();
 
@@ -3507,8 +3952,8 @@ class JsonPrismDeckApp {
     this.refs.collapseAllBtn.disabled = isBusy || !structuredPreviewMode;
     this.refs.copyPathBtn.disabled = isBusy || !hasValidJson;
     this.refs.copyValueBtn.disabled = isBusy || !hasValidJson;
-    this.refs.searchPrevBtn.disabled = isBusy || matchCount === 0;
-    this.refs.searchNextBtn.disabled = isBusy || matchCount === 0;
+    this.refs.searchPrevBtn.disabled = isBusy || searchBusy || matchCount === 0;
+    this.refs.searchNextBtn.disabled = isBusy || searchBusy || matchCount === 0;
   }
 
   /**

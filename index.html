@@ -81,7 +81,13 @@
           <main id="workspace" class="workspace" data-layout="horizontal">
             <section class="panel editor-panel glass-card">
               <header class="panel-head">
-                <div><h2>编辑区</h2></div>
+                <div class="panel-title-group">
+                  <h2>编辑区</h2>
+                  <div class="segmented editor-mode-switch" role="group" aria-label="编辑区模式">
+                    <button id="editorModeFullBtn" class="segment-btn is-active" type="button">完整</button>
+                    <button id="editorModeLiteBtn" class="segment-btn" type="button">精简</button>
+                  </div>
+                </div>
                 <div class="panel-actions">
                   <span id="editorLineStats" class="mini-pill">0 行</span>
                   <span id="editorByteStats" class="mini-pill">0 B</span>
@@ -101,6 +107,11 @@
                     wrap="off"
                     placeholder="把 JSON 粘贴到这里，或者拖放一个 .json 文件。"
                   ></textarea>
+                </div>
+                <div id="editorBusyMask" class="editor-busy-mask" aria-live="polite" aria-hidden="true">
+                  <span class="loading-spinner editor-busy-spinner" aria-hidden="true"></span>
+                  <strong id="editorBusyTitle" class="editor-busy-title">正在处理编辑区…</strong>
+                  <span id="editorBusyDetail" class="editor-busy-detail"></span>
                 </div>
               </div>
               <footer class="panel-foot">
