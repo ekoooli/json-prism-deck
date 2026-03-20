@@ -29,6 +29,7 @@
   --preview-tree-row-height: 32px;
   --preview-raw-font-size: 13px;
   --preview-raw-row-height: 28px;
+  --preview-path-mask-rgb: 255, 251, 246;
 }
 
 body[data-theme="night"] {
@@ -50,6 +51,7 @@ body[data-theme="night"] {
   --success-soft: rgba(115, 213, 167, 0.16);
   --shadow: 0 30px 80px rgba(2, 9, 13, 0.42);
   --glow: radial-gradient(circle at top right, rgba(103, 201, 188, 0.14), transparent 44%);
+  --preview-path-mask-rgb: 15, 28, 37;
 }
 
 * {
@@ -913,7 +915,12 @@ body[data-theme="night"] .preview-content {
 }
 
 .preview-row {
-  width: 100%;
+  /*
+   * 预览区需要同时兼顾“普通行铺满容器”和“超长行能把横向溢出暴露给外层滚动容器”。
+   * width:max-content 让行宽可以按内容扩展，min-width:100% 则保证短行仍然覆盖整行背景。
+   */
+  width: max-content;
+  min-width: 100%;
   border-bottom: 1px solid rgba(13, 76, 84, 0.08);
   pointer-events: auto;
 }
@@ -964,14 +971,32 @@ body[data-theme="night"] .preview-content {
 }
 
 .tree-row-content {
-  min-width: 0;
+  min-width: 100%;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding-right: 10px;
+  gap: 12px;
+  /*
+   * 右侧固定路径本身已经带了内边距，这里不能再额外留一层容器右内边距。
+   * 否则横向滚到最右时，sticky 路径会停在“内容区 padding 边界”而不是真正的右边界，
+   * 用户看到的就是路径和右边框之间平白多出一段约 10px 的空隙。
+   */
+  padding-right: 0;
   white-space: nowrap;
   user-select: text;
   font-size: var(--preview-tree-font-size);
+}
+
+.tree-row-main {
+  /*
+   * 主内容不能再跟随父容器被压扁，否则长值仍会在这一层被截断。
+   * 这里固定按内容宽度布局，让横向滚动回到 preview-content 统一处理。
+   */
+  flex: 0 0 auto;
+  min-width: max-content;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
 }
 
 .tree-line-number-tail {
@@ -1010,9 +1035,10 @@ body[data-theme="night"] .preview-content {
 }
 
 .tree-value {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  flex: 0 0 auto;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: pre;
   color: var(--text-soft);
   user-select: text;
 }
@@ -1022,7 +1048,20 @@ body[data-theme="night"] .preview-content {
 }
 
 .tree-path {
+  /*
+   * 路径列只保留最简单稳定的固定策略：贴右、纯色背景、少量左内边距。
+   * 不再引入会把列表宽度反复撑大的外溢装饰，优先保证横向滚动时路径稳定可读。
+   */
+  position: sticky;
+  right: 0;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
   margin-left: auto;
+  padding: 4px 10px 4px 14px;
+  background: rgba(var(--preview-path-mask-rgb), 0.96);
+  border-left: 1px solid rgba(13, 76, 84, 0.08);
   color: rgba(73, 104, 110, 0.76);
   font-size: calc(var(--preview-tree-font-size) - 2px);
   user-select: text;
@@ -1107,15 +1146,21 @@ body[data-theme="night"] .preview-content {
 }
 
 .raw-line-code {
+  /*
+   * 文本预览和树形预览共用同一块横向滚动容器。
+   * 这里必须去掉裁剪，代码列才能按真实文本宽度扩展，长行才不会只剩省略号。
+   */
   padding: 0 10px;
-  overflow: hidden;
+  overflow: visible;
   font-size: var(--preview-raw-font-size);
+  white-space: nowrap;
 }
 
 .raw-line-content {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  display: inline-block;
+  min-width: max-content;
+  overflow: visible;
+  text-overflow: clip;
   white-space: pre;
   user-select: text;
 }
@@ -1240,7 +1285,7 @@ body[data-theme="night"] .syntax-search-current {
 .selection-copy {
   min-width: 0;
   display: flex;
-  align-items: baseline;
+  align-items: flex-start;
   gap: 8px;
   flex-wrap: wrap;
 }
@@ -1257,8 +1302,19 @@ body[data-theme="night"] .syntax-search-current {
 }
 
 .selection-meta {
+  flex: 1 1 100%;
+  min-width: 0;
   color: var(--text-soft);
   font-size: 0.72rem;
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.selection-actions {
+  justify-content: flex-end;
+  flex: 0 0 auto;
 }
 
 .empty-state {

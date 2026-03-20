@@ -3,7 +3,7 @@ const STORAGE_KEY = "json-prism-deck-state";
 const DEFAULT_SAMPLE_TEXT = `{
   "workspace": {
     "name": "JSON Prism Deck",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "features": [
       "tree-preview",
       "virtual-scroll",
@@ -1093,6 +1093,8 @@ class VirtualList {
     this.emptyMessage = "暂无可展示内容";
     /** @type {number | null} */
     this.rafId = null;
+    /** @type {number} */
+    this.contentWidth = 0;
 
     this.container.style.position = "relative";
     this.spacer.className = "virtual-list-spacer";
@@ -1115,6 +1117,7 @@ class VirtualList {
     this.renderRow = config.renderRow;
     this.emptyMessage = config.emptyMessage || this.emptyMessage;
     this.staticMode = false;
+    this.contentWidth = Math.max(this.container.clientWidth, 0);
     this.ensureMounted();
   }
 
@@ -1140,6 +1143,7 @@ class VirtualList {
   setStaticContent(node) {
     this.staticMode = true;
     this.items = [];
+    this.contentWidth = 0;
     this.cancelScheduledRender();
     this.container.replaceChildren(node);
   }
@@ -1231,9 +1235,12 @@ class VirtualList {
     const visibleCount = Math.ceil(viewportHeight / this.rowHeight) + this.overscan * 2;
     const end = Math.min(this.items.length, start + visibleCount);
     const totalHeight = this.items.length * this.rowHeight;
+    const baseWidth = Math.max(this.contentWidth, this.container.clientWidth);
 
     this.spacer.style.height = `${totalHeight}px`;
+    this.spacer.style.width = `${baseWidth}px`;
     this.itemsHost.style.height = `${totalHeight}px`;
+    this.itemsHost.style.width = `${baseWidth}px`;
 
     const fragment = document.createDocumentFragment();
 
@@ -1242,12 +1249,33 @@ class VirtualList {
       row.style.position = "absolute";
       row.style.top = `${index * this.rowHeight}px`;
       row.style.left = "0";
-      row.style.right = "0";
+      /**
+       * 树形路径使用 sticky 固定在右边时，短行和长行必须共享同一条横向基线。
+       * 这里不再把行宽钉死成当前视口宽度，而是统一到“当前已知的最大内容宽度”，
+       * 否则横向滚动后只有超长行的路径会停在右边，短行会直接露出底层空白。
+       */
+      row.style.width = `${baseWidth}px`;
+      row.style.minWidth = `${baseWidth}px`;
       row.style.height = `${this.rowHeight}px`;
       fragment.append(row);
     }
 
     this.itemsHost.replaceChildren(fragment);
+
+    /**
+     * 由于虚拟列表一次只渲染可见行，最大横向宽度也只能从当前片段里渐进发现。
+     * 这里仅在真实内容更宽时提升列表基线宽度，并复用下一帧重绘；
+     * 路径右侧的纯装饰外边距不再参与宽度增长，避免出现“滚动条一直变长”的循环。
+     */
+    const measuredWidth = Math.max(
+      this.container.clientWidth,
+      ...Array.from(this.itemsHost.children, (child) => Math.ceil(/** @type {HTMLElement} */ (child).scrollWidth)),
+    );
+
+    if (measuredWidth > this.contentWidth + 1) {
+      this.contentWidth = measuredWidth;
+      this.scheduleRender();
+    }
   }
 }
 
@@ -1281,6 +1309,8 @@ class JsonPrismDeckApp {
     this.previewSearchTimer = null;
     /** @type {number | null} */
     this.noticeTimer = null;
+    /** @type {number} */
+    this.selectionPreviewRequestId = 0;
     /** @type {string | null} */
     this.noticeText = null;
     /** @type {"default" | "success" | "warning"} */
@@ -3436,11 +3466,65 @@ class JsonPrismDeckApp {
   }
 
   /**
+   * 组装底部“当前节点”摘要文案。
+   *
+   * 树列表里的 `node.preview` 会对长字符串做截断，这是为了控制虚拟列表单行渲染成本；
+   * 底部摘要区承担的是详情职责，因此允许在这里替换成更完整的值文本。
+   *
+   * @param {{
+   *   metaLabel: string,
+   *   preview: string
+   * }} node 当前节点。
+   * @param {string} [previewText=node.preview] 需要展示的预览文本。
+   * @return {string} 组合后的摘要文案。
+   */
+  buildSelectionMetaText(node, previewText = node.preview) {
+    return node.metaLabel ? `${node.metaLabel} · ${previewText}` : previewText;
+  }
+
+  /**
+   * 为底部摘要补齐被树列表截断的完整字符串值。
+   *
+   * 这里复用 worker 已缓存的 path -> value 索引获取子树文本，避免为了一个选中值再次在主线程整份 JSON.parse。
+   * 只有当前选中节点和请求轮次都还匹配时，才允许异步结果回填到 DOM。
+   *
+   * @param {string} nodeId 节点 id。
+   * @param {number} requestId 当前渲染轮次。
+   * @return {Promise<void>}
+   */
+  async hydrateSelectionMeta(nodeId, requestId) {
+    try {
+      const result = await this.worker.request("stringify", {
+        path: nodeId,
+        sortMode: "source",
+        indent: this.state.indent,
+        style: "minify",
+      });
+
+      if (requestId !== this.selectionPreviewRequestId || !this.state.valid || this.state.selectedNodeId !== nodeId) {
+        return;
+      }
+
+      const node = this.nodeMap.get(nodeId);
+
+      if (!node) {
+        return;
+      }
+
+      this.refs.selectionMeta.textContent = this.buildSelectionMetaText(node, result.text);
+    } catch (error) {
+      console.warn("无法补齐当前节点的完整摘要，已保留简短预览。", error);
+    }
+  }
+
+  /**
    * 渲染当前选中节点的路径和摘要。
    *
    * @return {void}
    */
   renderSelection() {
+    this.selectionPreviewRequestId += 1;
+
     if (this.state.isProcessing) {
       this.refs.selectionPath.textContent = "$";
       this.refs.selectionMeta.textContent = "正在重新计算预览节点。";
@@ -3466,7 +3550,11 @@ class JsonPrismDeckApp {
     }
 
     this.refs.selectionPath.textContent = node.path;
-    this.refs.selectionMeta.textContent = node.metaLabel ? `${node.metaLabel} · ${node.preview}` : node.preview;
+    this.refs.selectionMeta.textContent = this.buildSelectionMetaText(node);
+
+    if (node.type === "string" && node.preview.includes("…")) {
+      void this.hydrateSelectionMeta(node.id, this.selectionPreviewRequestId);
+    }
   }
 
   /**

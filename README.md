@@ -2,7 +2,7 @@
 
 一个可直接加载到 Chrome 的 Manifest V3 JSON 格式化预览插件。
 
-当前版本：`1.0.1`
+当前版本：`1.0.2`
 
 更新记录见：[更新记录.md](/Users/rcc/Personal/json-extensions/更新记录.md)
 
