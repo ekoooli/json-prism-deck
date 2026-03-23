@@ -362,6 +362,16 @@ button:focus-visible {
   gap: 6px;
 }
 
+.toolbar-action-grid {
+  /*
+   * 这四个按钮的语义更偏“次级操作”，没必要继续各占一整行。
+   * 收成 2 列紧凑网格后，工具栏高度会明显下降，同时仍保留按钮级的独立点击目标。
+   */
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
 .tool-btn,
 .segment-btn,
 .icon-btn,
@@ -385,6 +395,12 @@ input[type="search"] {
   padding: 0 10px;
   font-weight: 600;
   justify-content: center;
+}
+
+.toolbar-compact-btn {
+  min-height: 28px;
+  padding: 0 8px;
+  font-size: 0.74rem;
 }
 
 .search-option-btn {

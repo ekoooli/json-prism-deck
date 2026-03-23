@@ -165,11 +165,15 @@
           <section class="toolbar-section">
             <div class="toolbar-group">
               <button id="formatBtn" class="tool-btn primary">格式化</button>
-              <button id="minifyBtn" class="tool-btn">压缩</button>
+              <button id="unpackFormatBtn" class="tool-btn">解包格式化</button>
+              <button id="unpackMinifyBtn" class="tool-btn">解包压缩</button>
               <button id="sortFormatBtn" class="tool-btn">按预览排序格式化</button>
-              <button id="copyBtn" class="tool-btn">复制</button>
-              <button id="downloadBtn" class="tool-btn">下载</button>
-              <button id="importBtn" class="tool-btn">导入</button>
+              <div class="toolbar-action-grid" aria-label="辅助操作">
+                <button id="minifyBtn" class="tool-btn toolbar-compact-btn">压缩</button>
+                <button id="downloadBtn" class="tool-btn toolbar-compact-btn">下载</button>
+                <button id="copyBtn" class="tool-btn toolbar-compact-btn">复制</button>
+                <button id="importBtn" class="tool-btn toolbar-compact-btn">导入</button>
+              </div>
               <button id="sampleBtn" class="tool-btn accent">示例数据</button>
               <button id="clearBtn" class="tool-btn danger">清空</button>
             </div>

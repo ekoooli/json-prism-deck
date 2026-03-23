@@ -1,9 +1,11 @@
+import { unpackEmbeddedJsonText } from "./unpack-json-string.js";
+
 const STORAGE_KEY = "json-prism-deck-state";
 
 const DEFAULT_SAMPLE_TEXT = `{
   "workspace": {
     "name": "JSON Prism Deck",
-    "version": "1.0.2",
+    "version": "1.0.3",
     "features": [
       "tree-preview",
       "virtual-scroll",
@@ -1423,6 +1425,8 @@ class JsonPrismDeckApp {
       previewFontUpBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("previewFontUpBtn")),
       formatBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("formatBtn")),
       minifyBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("minifyBtn")),
+      unpackFormatBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("unpackFormatBtn")),
+      unpackMinifyBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("unpackMinifyBtn")),
       sortFormatBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("sortFormatBtn")),
       copyBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("copyBtn")),
       downloadBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("downloadBtn")),
@@ -1812,6 +1816,8 @@ class JsonPrismDeckApp {
 
     this.refs.formatBtn.addEventListener("click", () => void this.applyStringify("pretty", "source"));
     this.refs.minifyBtn.addEventListener("click", () => void this.applyStringify("minify", "source"));
+    this.refs.unpackFormatBtn.addEventListener("click", () => this.applyEmbeddedUnpack("pretty"));
+    this.refs.unpackMinifyBtn.addEventListener("click", () => this.applyEmbeddedUnpack("minify"));
     this.refs.sortFormatBtn.addEventListener("click", () => void this.applyStringify("pretty", this.state.sortMode));
     this.refs.copyBtn.addEventListener("click", () => void this.copyText(this.refs.jsonEditor.value, "已复制编辑区 JSON。"));
     this.refs.downloadBtn.addEventListener("click", () => this.downloadEditorText());
@@ -4039,6 +4045,8 @@ class JsonPrismDeckApp {
 
     this.refs.formatBtn.disabled = isBusy || !hasValidJson;
     this.refs.minifyBtn.disabled = isBusy || !hasValidJson;
+    this.refs.unpackFormatBtn.disabled = isBusy || !hasValidJson;
+    this.refs.unpackMinifyBtn.disabled = isBusy || !hasValidJson;
     this.refs.sortFormatBtn.disabled = isBusy || !hasValidJson;
     this.refs.copyBtn.disabled = !hasText;
     this.refs.downloadBtn.disabled = !hasText;
@@ -4112,6 +4120,36 @@ class JsonPrismDeckApp {
 
     this.replaceEditorText(result.text);
     this.pushNotice(style === "minify" ? "已压缩并回写编辑区。" : "已格式化并回写编辑区。");
+  }
+
+  /**
+   * 将“根节点是字符串、字符串里仍然是一份 JSON”的文本解包并回写到编辑区。
+   *
+   * 常规“格式化/压缩”按钮仍然保持一次解析的直观语义：输入是什么，就格式化什么。
+   * 只有用户显式点击“解包”按钮时，才会把包装字符串改写成真正的对象/数组 JSON，
+   * 这样既满足这类场景的效率需求，也避免工作台在普通字符串数据上偷偷改写源文本。
+   *
+   * @param {"pretty" | "minify"} style 输出样式。
+   * @return {void}
+   */
+  applyEmbeddedUnpack(style) {
+    if (!this.state.valid) {
+      this.pushNotice("当前 JSON 非法，无法执行解包。");
+      return;
+    }
+
+    try {
+      const resultText = unpackEmbeddedJsonText(this.refs.jsonEditor.value, {
+        style,
+        indent: this.state.indent,
+      });
+
+      this.replaceEditorText(resultText, { resetExpansion: true });
+      this.pushNotice(style === "minify" ? "已解包并压缩字符串 JSON。" : "已解包并格式化字符串 JSON。");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "当前内容不属于可解包的 JSON 字符串。";
+      this.pushNotice(message);
+    }
   }
 
   /**
