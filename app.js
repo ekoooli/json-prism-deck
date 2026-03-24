@@ -1,3 +1,4 @@
+import { shouldReparseForSortChange } from "./sort-refresh-policy.js";
 import { unpackEmbeddedJsonText } from "./unpack-json-string.js";
 
 const STORAGE_KEY = "json-prism-deck-state";
@@ -1301,6 +1302,8 @@ class JsonPrismDeckApp {
     this.previewList = deps.previewList;
     /** @type {number} */
     this.parseVersion = 0;
+    /** @type {number} */
+    this.viewRequestVersion = 0;
     /** @type {number | null} */
     this.parseTimer = null;
     /** @type {number | null} */
@@ -1311,8 +1314,6 @@ class JsonPrismDeckApp {
     this.previewSearchTimer = null;
     /** @type {number | null} */
     this.noticeTimer = null;
-    /** @type {number} */
-    this.selectionPreviewRequestId = 0;
     /** @type {string | null} */
     this.noticeText = null;
     /** @type {"default" | "success" | "warning"} */
@@ -1353,6 +1354,12 @@ class JsonPrismDeckApp {
     this.textRowIndexByNodeId = new Map();
     /** @type {boolean} */
     this.forceExpandOnNextValidParse = false;
+    /** @type {boolean} */
+    this.resetEditorScrollOnNextDataLoad = false;
+    /** @type {boolean} */
+    this.resetPreviewScrollOnNextDataLoad = false;
+    /** @type {string | null} */
+    this.lastSuccessfulParsedText = null;
     /** @type {{ lines: number, bytes: number, isLarge: boolean }} */
     this.editorScale = measureTextScale(DEFAULT_SETTINGS.text);
 
@@ -1426,7 +1433,6 @@ class JsonPrismDeckApp {
       formatBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("formatBtn")),
       minifyBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("minifyBtn")),
       unpackFormatBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("unpackFormatBtn")),
-      unpackMinifyBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("unpackMinifyBtn")),
       sortFormatBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("sortFormatBtn")),
       copyBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("copyBtn")),
       downloadBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("downloadBtn")),
@@ -1736,6 +1742,75 @@ class JsonPrismDeckApp {
   }
 
   /**
+   * 标记“下一次载入新数据时需要复位哪些滚动条”。
+   *
+   * 粘贴新数据时需要同时复位编辑区与预览区；
+   * 而格式化只会改写编辑区文本，不应该打断用户在预览区的浏览位置。
+   * 因此这里拆成独立开关，让不同入口按真实交互意图选择复位范围。
+   *
+   * @param {{ editor?: boolean, preview?: boolean }} [options] 复位目标。
+   * @return {void}
+   */
+  requestViewportResetOnNextDataLoad(options = {}) {
+    const shouldResetEditor = options.editor !== false;
+    const shouldResetPreview = options.preview !== false;
+
+    if (shouldResetEditor) {
+      this.resetEditorScrollOnNextDataLoad = true;
+    }
+
+    if (shouldResetPreview) {
+      this.resetPreviewScrollOnNextDataLoad = true;
+    }
+  }
+
+  /**
+   * 在新数据进入后复位编辑区与预览区滚动条。
+   *
+   * 这里同时重置纵向和横向位置，并同步语法镜像层的 transform，
+   * 这样编辑区不会出现“滚动条回到顶部但高亮层仍停在旧偏移”的错位。
+   *
+   * @return {void}
+   */
+  resetWorkspaceScrollIfNeeded() {
+    const shouldResetEditor = this.resetEditorScrollOnNextDataLoad;
+    const shouldResetPreview = this.resetPreviewScrollOnNextDataLoad;
+
+    if (!shouldResetEditor && !shouldResetPreview) {
+      return;
+    }
+
+    this.resetEditorScrollOnNextDataLoad = false;
+    this.resetPreviewScrollOnNextDataLoad = false;
+
+    /**
+     * 执行一次真实复位。
+     *
+     * 这里会在当前事件循环和下一帧各执行一次，
+     * 目的是覆盖浏览器在 paste/回写后对 caret 可见性的自动滚动修正，避免“看起来没复位”。
+     *
+     * @return {void}
+     */
+    const applyReset = () => {
+      if (shouldResetEditor) {
+        this.refs.jsonEditor.scrollTop = 0;
+        this.refs.jsonEditor.scrollLeft = 0;
+        this.refs.lineNumbers.scrollTop = 0;
+        this.syncEditorSyntaxScroll();
+      }
+
+      if (shouldResetPreview) {
+        this.refs.previewContent.scrollTop = 0;
+        this.refs.previewContent.scrollLeft = 0;
+        this.previewList.scheduleRender();
+      }
+    };
+
+    applyReset();
+    window.requestAnimationFrame(() => applyReset());
+  }
+
+  /**
    * 应用编辑区模式。
    *
    * 精简模式的目标是尽量保留原生 textarea 的性能上限，因此这里统一把视觉状态投射到容器 data 属性，
@@ -1805,7 +1880,13 @@ class JsonPrismDeckApp {
    */
   bindEvents() {
     this.refs.jsonEditor.addEventListener("input", () => this.handleEditorInput());
-    this.refs.jsonEditor.addEventListener("paste", () => this.requestExpansionResetOnNextValidParse());
+    this.refs.jsonEditor.addEventListener("paste", () => {
+      this.requestExpansionResetOnNextValidParse();
+      this.requestViewportResetOnNextDataLoad({
+        editor: true,
+        preview: true,
+      });
+    });
     this.refs.jsonEditor.addEventListener("scroll", () => {
       this.refs.lineNumbers.scrollTop = this.refs.jsonEditor.scrollTop;
       this.syncEditorSyntaxScroll();
@@ -1817,7 +1898,6 @@ class JsonPrismDeckApp {
     this.refs.formatBtn.addEventListener("click", () => void this.applyStringify("pretty", "source"));
     this.refs.minifyBtn.addEventListener("click", () => void this.applyStringify("minify", "source"));
     this.refs.unpackFormatBtn.addEventListener("click", () => this.applyEmbeddedUnpack("pretty"));
-    this.refs.unpackMinifyBtn.addEventListener("click", () => this.applyEmbeddedUnpack("minify"));
     this.refs.sortFormatBtn.addEventListener("click", () => void this.applyStringify("pretty", this.state.sortMode));
     this.refs.copyBtn.addEventListener("click", () => void this.copyText(this.refs.jsonEditor.value, "已复制编辑区 JSON。"));
     this.refs.downloadBtn.addEventListener("click", () => this.downloadEditorText());
@@ -1868,9 +1948,7 @@ class JsonPrismDeckApp {
     this.refs.searchRegexBtn.addEventListener("click", () => this.toggleSearchOption("searchRegex"));
 
     this.refs.sortSelect.addEventListener("change", () => {
-      this.state.sortMode = /** @type {"source" | "asc" | "desc"} */ (this.refs.sortSelect.value);
-      this.schedulePersist();
-      void this.rebuildIfPossible();
+      this.handleSortModeChange(/** @type {"source" | "asc" | "desc"} */ (this.refs.sortSelect.value));
     });
 
     document.querySelectorAll("[data-layout]").forEach((button) => {
@@ -2154,6 +2232,7 @@ class JsonPrismDeckApp {
   handleEditorInput() {
     this.state.text = this.refs.jsonEditor.value;
     this.updateEditorScale(this.state.text);
+    this.resetWorkspaceScrollIfNeeded();
 
     if (this.state.isLargeFileMode) {
       const needsBusyOverlay = this.state.editorMode === "full";
@@ -2217,17 +2296,27 @@ class JsonPrismDeckApp {
    * 用新的文本整体替换编辑区。
    *
    * @param {string} text 新文本。
-   * @param {{ resetExpansion?: boolean }} [options] 是否把这次替换视为“新数据进入”。
+   * @param {{ resetExpansion?: boolean, resetEditorScroll?: boolean, resetPreviewScroll?: boolean }} [options] 替换选项。
    * @return {void}
    */
   replaceEditorText(text, options = {}) {
     if (options.resetExpansion) {
       this.requestExpansionResetOnNextValidParse();
+      this.requestViewportResetOnNextDataLoad({
+        editor: options.resetEditorScroll !== false,
+        preview: options.resetPreviewScroll !== false,
+      });
+    } else if (options.resetEditorScroll || options.resetPreviewScroll) {
+      this.requestViewportResetOnNextDataLoad({
+        editor: Boolean(options.resetEditorScroll),
+        preview: Boolean(options.resetPreviewScroll),
+      });
     }
 
     this.refs.jsonEditor.value = text;
     this.state.text = text;
     this.updateEditorScale(text);
+    this.resetWorkspaceScrollIfNeeded();
 
     if (this.state.isLargeFileMode) {
       const needsBusyOverlay = this.state.editorMode === "full";
@@ -2280,9 +2369,11 @@ class JsonPrismDeckApp {
     this.state.text = this.refs.jsonEditor.value;
     this.updateEditorScale(this.state.text);
     const text = this.state.text;
+    const requestVersion = this.viewRequestVersion += 1;
 
     if (!text.trim()) {
       this.state.isProcessing = false;
+      this.lastSuccessfulParsedText = null;
       this.applyEmptyState();
       this.renderAll();
       return;
@@ -2297,20 +2388,23 @@ class JsonPrismDeckApp {
         indent: this.state.indent,
       });
 
-      if (version !== this.parseVersion) {
+      if (version !== this.parseVersion || requestVersion !== this.viewRequestVersion) {
         return;
       }
 
       if (result.ok) {
+        this.lastSuccessfulParsedText = text;
         this.applyValidResult(result);
       } else {
+        this.lastSuccessfulParsedText = null;
         this.applyInvalidResult(result);
       }
     } catch (error) {
-      if (version !== this.parseVersion) {
+      if (version !== this.parseVersion || requestVersion !== this.viewRequestVersion) {
         return;
       }
 
+      this.lastSuccessfulParsedText = null;
       this.applyWorkerFailure(error instanceof Error ? error.message : String(error));
     }
 
@@ -2328,18 +2422,60 @@ class JsonPrismDeckApp {
       return;
     }
 
+    const requestVersion = this.viewRequestVersion += 1;
+
     try {
       const result = await this.worker.request("rebuild", {
         sortMode: this.state.sortMode,
         indent: this.state.indent,
       });
 
+      if (requestVersion !== this.viewRequestVersion) {
+        return;
+      }
+
       this.applyValidResult(result);
       this.renderAll();
     } catch (error) {
+      if (requestVersion !== this.viewRequestVersion) {
+        return;
+      }
+
       console.warn("重建失败，已回退重新解析。", error);
       await this.refreshJsonState();
     }
+  }
+
+  /**
+   * 处理排序模式切换。
+   *
+   * “字母升序/降序”只需要在当前成功解析的 JSON 快照上重建派生视图；
+   * 但“源顺序”语义必须回到“当前编辑区文本里的字段顺序”，否则一旦中间经历过排序预览或旧请求回放，
+   * 用户就会看到界面声称已切回源顺序，实际展示的却仍是上一份派生排序结果。
+   * 因此这里对“切回源顺序”以及“编辑区文本与最近一次成功解析快照已不一致”的场景强制走全量解析。
+   *
+   * @param {"source" | "asc" | "desc"} nextSortMode 目标排序模式。
+   * @return {void}
+   */
+  handleSortModeChange(nextSortMode) {
+    if (nextSortMode === this.state.sortMode) {
+      return;
+    }
+
+    this.state.sortMode = nextSortMode;
+    this.refs.sortSelect.value = nextSortMode;
+    this.schedulePersist();
+
+    if (shouldReparseForSortChange({
+      nextSortMode,
+      editorText: this.refs.jsonEditor.value,
+      lastSuccessfulParsedText: this.lastSuccessfulParsedText,
+    })) {
+      void this.refreshJsonState();
+      return;
+    }
+
+    void this.rebuildIfPossible();
   }
 
   /**
@@ -3472,78 +3608,23 @@ class JsonPrismDeckApp {
   }
 
   /**
-   * 组装底部“当前节点”摘要文案。
+   * 渲染当前选中节点路径。
    *
-   * 树列表里的 `node.preview` 会对长字符串做截断，这是为了控制虚拟列表单行渲染成本；
-   * 底部摘要区承担的是详情职责，因此允许在这里替换成更完整的值文本。
-   *
-   * @param {{
-   *   metaLabel: string,
-   *   preview: string
-   * }} node 当前节点。
-   * @param {string} [previewText=node.preview] 需要展示的预览文本。
-   * @return {string} 组合后的摘要文案。
-   */
-  buildSelectionMetaText(node, previewText = node.preview) {
-    return node.metaLabel ? `${node.metaLabel} · ${previewText}` : previewText;
-  }
-
-  /**
-   * 为底部摘要补齐被树列表截断的完整字符串值。
-   *
-   * 这里复用 worker 已缓存的 path -> value 索引获取子树文本，避免为了一个选中值再次在主线程整份 JSON.parse。
-   * 只有当前选中节点和请求轮次都还匹配时，才允许异步结果回填到 DOM。
-   *
-   * @param {string} nodeId 节点 id。
-   * @param {number} requestId 当前渲染轮次。
-   * @return {Promise<void>}
-   */
-  async hydrateSelectionMeta(nodeId, requestId) {
-    try {
-      const result = await this.worker.request("stringify", {
-        path: nodeId,
-        sortMode: "source",
-        indent: this.state.indent,
-        style: "minify",
-      });
-
-      if (requestId !== this.selectionPreviewRequestId || !this.state.valid || this.state.selectedNodeId !== nodeId) {
-        return;
-      }
-
-      const node = this.nodeMap.get(nodeId);
-
-      if (!node) {
-        return;
-      }
-
-      this.refs.selectionMeta.textContent = this.buildSelectionMetaText(node, result.text);
-    } catch (error) {
-      console.warn("无法补齐当前节点的完整摘要，已保留简短预览。", error);
-    }
-  }
-
-  /**
-   * 渲染当前选中节点的路径和摘要。
+   * 底部栏现在被压成单行轻量信息，职责只剩“告诉用户当前聚焦节点在哪”；
+   * 节点值展示已移除，避免长值摘要反复回填带来的视觉跳动和额外 worker 开销。
    *
    * @return {void}
    */
   renderSelection() {
-    this.selectionPreviewRequestId += 1;
+    this.refs.selectionMeta.textContent = "";
 
     if (this.state.isProcessing) {
       this.refs.selectionPath.textContent = "$";
-      this.refs.selectionMeta.textContent = "正在重新计算预览节点。";
       return;
     }
 
     if (!this.state.valid) {
       this.refs.selectionPath.textContent = "$";
-      this.refs.selectionMeta.textContent = this.state.empty
-        ? "输入有效 JSON 后会在这里显示当前节点路径和摘要。"
-        : this.state.error?.line
-          ? `错误位置：第 ${this.state.error.line} 行，第 ${this.state.error.column || "?"} 列`
-          : "当前无法提取节点信息。";
       return;
     }
 
@@ -3551,16 +3632,10 @@ class JsonPrismDeckApp {
 
     if (!node) {
       this.refs.selectionPath.textContent = "$";
-      this.refs.selectionMeta.textContent = "尚未选中节点";
       return;
     }
 
     this.refs.selectionPath.textContent = node.path;
-    this.refs.selectionMeta.textContent = this.buildSelectionMetaText(node);
-
-    if (node.type === "string" && node.preview.includes("…")) {
-      void this.hydrateSelectionMeta(node.id, this.selectionPreviewRequestId);
-    }
   }
 
   /**
@@ -3986,48 +4061,46 @@ class JsonPrismDeckApp {
 
     if (this.state.isProcessing) {
       this.refs.previewState.textContent = this.state.isLargeFileMode
-        ? `正在处理大文件 JSON：${formatCount(this.editorScale.lines)} 行，${formatBytes(this.editorScale.bytes)}。`
-        : "正在刷新预览。";
+        ? `处理中 · ${formatCount(this.editorScale.lines)} 行`
+        : "处理中";
       return;
     }
 
     if (this.state.isPreviewSearchPending) {
-      this.refs.previewState.textContent = this.state.isLargeFileMode
-        ? "正在更新大文件搜索结果…"
-        : "正在更新搜索结果…";
+      this.refs.previewState.textContent = "搜索更新中";
       return;
     }
 
     if (this.searchPlan.error) {
-      this.refs.previewState.textContent = `搜索表达式无效：${this.searchPlan.error}`;
+      this.refs.previewState.textContent = `搜索错误：${this.searchPlan.error}`;
       return;
     }
 
     if (this.state.empty) {
-      this.refs.previewState.textContent = "预览区待命中。";
+      this.refs.previewState.textContent = "待输入";
       return;
     }
 
     if (!this.state.valid) {
       this.refs.previewState.textContent = this.state.error?.line
-        ? `错误位置：第 ${this.state.error.line} 行，第 ${this.state.error.column || "?"} 列。`
-        : "JSON 解析失败。";
+        ? `错误 · ${this.state.error.line}:${this.state.error.column || "?"}`
+        : "JSON 错误";
       return;
     }
 
     if (this.state.previewMode === "tree") {
       const visible = this.buildVisibleTreeRows().filter((row) => row.kind === "node").length;
-      this.refs.previewState.textContent = `树形预览 · 可见节点 ${formatCount(visible)} / 总节点 ${formatCount(this.state.metadata.nodeCount)} · 已启用虚拟滚动。`;
+      this.refs.previewState.textContent = `树形 · ${formatCount(visible)} / ${formatCount(this.state.metadata.nodeCount)}`;
       return;
     }
 
     if (this.state.previewMode === "text") {
       const visible = this.buildVisibleTextRows().length;
-      this.refs.previewState.textContent = `文本预览 · 可见代码行 ${formatCount(visible)} / 完整 ${formatCount(this.state.metadata.formattedLines)} 行 · 支持折叠/展开。`;
+      this.refs.previewState.textContent = `文本 · ${formatCount(visible)} / ${formatCount(this.state.metadata.formattedLines)}`;
       return;
     }
 
-    this.refs.previewState.textContent = "元数据视图 · 展示规模、结构分布和当前预览配置。";
+    this.refs.previewState.textContent = "元数据";
   }
 
   /**
@@ -4046,7 +4119,6 @@ class JsonPrismDeckApp {
     this.refs.formatBtn.disabled = isBusy || !hasValidJson;
     this.refs.minifyBtn.disabled = isBusy || !hasValidJson;
     this.refs.unpackFormatBtn.disabled = isBusy || !hasValidJson;
-    this.refs.unpackMinifyBtn.disabled = isBusy || !hasValidJson;
     this.refs.sortFormatBtn.disabled = isBusy || !hasValidJson;
     this.refs.copyBtn.disabled = !hasText;
     this.refs.downloadBtn.disabled = !hasText;
@@ -4118,7 +4190,10 @@ class JsonPrismDeckApp {
       indent: this.state.indent,
     });
 
-    this.replaceEditorText(result.text);
+    this.replaceEditorText(result.text, {
+      resetEditorScroll: true,
+      resetPreviewScroll: false,
+    });
     this.pushNotice(style === "minify" ? "已压缩并回写编辑区。" : "已格式化并回写编辑区。");
   }
 

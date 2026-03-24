@@ -884,14 +884,59 @@ body[data-theme="night"] .editor-busy-mask {
   align-items: center;
 }
 
+.preview-title-wrap {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .preview-toolbar {
   justify-content: flex-end;
+  flex: 0 0 auto;
+}
+
+.preview-toolbar .segmented {
+  gap: 4px;
+}
+
+.preview-toolbar .segment-btn,
+.preview-toolbar .tool-btn {
+  min-height: 26px;
+  padding: 0 8px;
+  border-radius: 9px;
+  font-size: 0.74rem;
+}
+
+.preview-toolbar .tool-btn {
+  width: auto;
+}
+
+.preview-toolbar .tool-field.compact {
+  gap: 6px;
+}
+
+.preview-toolbar .tool-field.compact span {
+  font-size: 0.74rem;
+}
+
+.preview-toolbar .tool-field.compact select {
+  min-height: 26px;
+  padding: 0 26px 0 8px;
+  font-size: 0.74rem;
 }
 
 .preview-state {
-  min-height: 14px;
+  min-width: 0;
+  flex: 1;
+  display: inline-block;
   color: var(--text-soft);
-  font-size: 0.78rem;
+  font-size: 0.74rem;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .preview-content {
@@ -1266,7 +1311,7 @@ body[data-theme="night"] .syntax-search-current {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 8px;
-  padding: 2px;
+  padding: 8px;
 }
 
 .meta-card {
@@ -1292,45 +1337,59 @@ body[data-theme="night"] .syntax-search-current {
 }
 
 .selection-bar {
-  border-radius: 12px;
-  padding: 6px 8px;
-  border: 1px solid var(--stroke);
-  background: var(--card-strong);
+  border-radius: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 
 .selection-copy {
   min-width: 0;
   display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: nowrap;
 }
 
 .selection-label {
   color: var(--text-soft);
-  font-size: 0.72rem;
+  font-size: 0.74rem;
 }
 
 #selectionPath {
-  max-width: min(100%, 700px);
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.selection-meta {
-  flex: 1 1 100%;
-  min-width: 0;
+  max-width: min(100%, 760px);
   color: var(--text-soft);
-  font-size: 0.72rem;
-  line-height: 1.5;
+  font-size: 0.74rem;
+  font-weight: 500;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+.selection-meta {
+  display: none;
+}
+
 .selection-actions {
   justify-content: flex-end;
   flex: 0 0 auto;
+}
+
+.selection-actions .tool-btn {
+  min-height: auto;
+  padding: 0 3px;
+  border: 0;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 0.74rem;
+  font-weight: 500;
+}
+
+.selection-actions .tool-btn:hover {
+  transform: none;
+  border: 0;
+  background: transparent;
+  color: var(--accent-strong);
 }
 
 .empty-state {

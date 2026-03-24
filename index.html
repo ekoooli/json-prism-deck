@@ -123,7 +123,10 @@
 
             <section class="panel preview-panel glass-card">
               <header class="panel-head preview-head">
-                <div><h2>预览区</h2></div>
+                <div class="preview-title-wrap">
+                  <h2>预览区</h2>
+                  <span id="previewState" class="preview-state"></span>
+                </div>
                 <div class="preview-toolbar">
                   <div class="segmented" role="group" aria-label="预览模式">
                     <button class="segment-btn is-active" data-preview-mode="tree">树形</button>
@@ -143,7 +146,6 @@
                 </div>
               </header>
 
-              <div id="previewState" class="preview-state"></div>
               <div id="previewContent" class="preview-content" aria-live="polite"></div>
 
               <footer class="selection-bar">
@@ -166,7 +168,6 @@
             <div class="toolbar-group">
               <button id="formatBtn" class="tool-btn primary">格式化</button>
               <button id="unpackFormatBtn" class="tool-btn">解包格式化</button>
-              <button id="unpackMinifyBtn" class="tool-btn">解包压缩</button>
               <button id="sortFormatBtn" class="tool-btn">按预览排序格式化</button>
               <div class="toolbar-action-grid" aria-label="辅助操作">
                 <button id="minifyBtn" class="tool-btn toolbar-compact-btn">压缩</button>
