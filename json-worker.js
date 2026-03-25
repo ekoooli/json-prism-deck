@@ -121,10 +121,14 @@ function buildNodePath(parentPath, key, parentType) {
 }
 
 /**
- * 生成叶子节点的简短展示文案。
+ * 生成叶子节点的展示文案。
  *
- * 预览区是高密度列表，文案必须足够短，否则虚拟滚动虽然能减 DOM，
- * 但单行渲染仍会因为文本测量过重而拖慢滚动。
+ * 树形预览已经明确约定“长值不截断、交给横向滚动承接”，
+ * 因此这里不能再提前把字符串裁成省略号，否则主线程永远拿不到全文，
+ * 路径 sticky 固定和搜索命中都只能基于一份已经失真的摘要继续工作。
+ *
+ * 性能上的约束改由“固定行高虚拟滚动 + 仅渲染可见区”承担；
+ * 也就是说，允许少量可见长值变宽，但不允许 worker 在协议层面丢掉真实内容。
  *
  * @param {unknown} value 叶子值。
  * @return {{ preview: string, metaLabel: string }} 预览文案和补充说明。
@@ -133,11 +137,8 @@ function buildLeafPreview(value) {
   const type = getJsonType(value);
 
   if (type === "string") {
-    const raw = /** @type {string} */ (value);
-    const shortened = raw.length > 88 ? `${raw.slice(0, 88)}…` : raw;
-
     return {
-      preview: JSON.stringify(shortened),
+      preview: JSON.stringify(/** @type {string} */ (value)),
       metaLabel: "",
     };
   }
