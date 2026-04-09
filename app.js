@@ -49,7 +49,7 @@ const DEFAULT_SETTINGS = {
   indent: 2,
   layout: "horizontal",
   theme: "dawn",
-  previewMode: "tree",
+  previewMode: "text",
   sortMode: "source",
   workspaceRatio: 0.48,
   searchQuery: "",
@@ -2068,6 +2068,9 @@ class JsonPrismDeckApp {
   /**
    * 从持久化中恢复设置。
    *
+   * 预览模式刻意不跟随会话态恢复，而是每次打开都强制回到文本预览：
+   * 这样用户刷新页面或重新打开插件时，看到的入口始终一致，不会被上一轮临时切到树形/元数据的操作带偏。
+   *
    * @return {Promise<void>}
    */
   async restoreState() {
@@ -2077,7 +2080,7 @@ class JsonPrismDeckApp {
     this.state.indent = stored.indent === 4 ? 4 : 2;
     this.state.layout = stored.layout === "vertical" ? "vertical" : "horizontal";
     this.state.theme = stored.theme === "night" ? "night" : "dawn";
-    this.state.previewMode = "tree";
+    this.state.previewMode = "text";
     this.state.sortMode = stored.sortMode === "asc" || stored.sortMode === "desc" ? stored.sortMode : "source";
     this.state.workspaceRatio = clamp(Number(stored.workspaceRatio) || DEFAULT_SETTINGS.workspaceRatio, 0.25, 0.75);
     this.state.searchQuery = typeof stored.searchQuery === "string" ? stored.searchQuery : "";
