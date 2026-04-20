@@ -143,6 +143,19 @@
                   </label>
                   <button id="expandAllBtn" class="tool-btn">展开全部</button>
                   <button id="collapseAllBtn" class="tool-btn">折叠全部</button>
+                  <div class="expand-depth-control">
+                    <button
+                      id="expandDepthBtn"
+                      class="tool-btn expand-depth-trigger"
+                      type="button"
+                      aria-haspopup="listbox"
+                      aria-expanded="false"
+                      aria-controls="expandDepthMenu"
+                    >
+                      展开层级
+                    </button>
+                    <div id="expandDepthMenu" class="expand-depth-menu" role="listbox" aria-label="展开层级选项"></div>
+                  </div>
                 </div>
               </header>
 

@@ -265,7 +265,7 @@ button:focus-visible {
 }
 
 .toolbar {
-  flex: 0 0 192px;
+  flex: 0 0 184px;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -911,6 +911,63 @@ body[data-theme="night"] .editor-busy-mask {
 
 .preview-toolbar .tool-btn {
   width: auto;
+}
+
+.expand-depth-control {
+  position: relative;
+}
+
+.preview-toolbar .expand-depth-trigger {
+  min-width: 86px;
+  padding: 0 10px;
+  justify-content: center;
+}
+
+.expand-depth-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 6;
+  min-width: 108px;
+  padding: 4px;
+  display: none;
+  flex-direction: column;
+  gap: 4px;
+  border-radius: 10px;
+  border: 1px solid var(--stroke);
+  background: var(--card-strong);
+  box-shadow: 0 12px 28px rgba(13, 76, 84, 0.16);
+}
+
+.expand-depth-menu.is-open {
+  display: flex;
+}
+
+.expand-depth-option {
+  min-height: 26px;
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 0.74rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.expand-depth-option:hover {
+  background: rgba(21, 122, 115, 0.08);
+  border-color: rgba(21, 122, 115, 0.12);
+  color: var(--text);
+}
+
+.expand-depth-option.is-active {
+  background: rgba(21, 122, 115, 0.14);
+  border-color: rgba(21, 122, 115, 0.2);
+  color: var(--accent-strong);
 }
 
 .preview-toolbar .tool-field.compact {

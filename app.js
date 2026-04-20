@@ -1,5 +1,6 @@
 import { shouldReparseForSortChange } from "./sort-refresh-policy.js";
 import { unpackEmbeddedJsonText } from "./unpack-json-string.js";
+import { buildExpandDepthOptions as buildExpandDepthOptionsByMaxDepth, pickExpandedIdsByDepth } from "./expand-depth-policy.js";
 
 const STORAGE_KEY = "json-prism-deck-state";
 
@@ -1382,6 +1383,9 @@ class JsonPrismDeckApp {
       autoExpandedIds: new Set(),
       formattedText: "",
       selectedNodeId: "$",
+      selectedExpandDepth: null,
+      isExpandDepthMenuOpen: false,
+      maxExpandableDepth: 0,
       searchMatches: [],
       currentMatchIndex: 0,
       editorSearchMatches: [],
@@ -1441,6 +1445,8 @@ class JsonPrismDeckApp {
       sampleBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("sampleBtn")),
       expandAllBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("expandAllBtn")),
       collapseAllBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("collapseAllBtn")),
+      expandDepthBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("expandDepthBtn")),
+      expandDepthMenu: /** @type {HTMLElement} */ (getRequiredElement("expandDepthMenu")),
       searchPrevBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("searchPrevBtn")),
       searchNextBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("searchNextBtn")),
       copyPathBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("copyPathBtn")),
@@ -1472,6 +1478,7 @@ class JsonPrismDeckApp {
     this.applyEditorMode(this.state.editorMode);
     this.renderEditorBusyState();
     this.applyPreviewModeButtons();
+    this.renderExpandDepthControl();
     this.refreshSearchPlan();
     this.renderSearchTargetControl();
     this.renderSearchControls();
@@ -1981,21 +1988,50 @@ class JsonPrismDeckApp {
     });
 
     this.refs.expandAllBtn.addEventListener("click", () => {
+      this.resetExpandDepthSelection();
       this.state.expandedIds = new Set(this.state.expandableIds);
       this.state.hasCustomExpansion = true;
       // 结构化预览的可见行会复用缓存；批量展开后如果不先失效缓存，
       // `renderPreview()` 仍会吃到旧的折叠树，用户就会看到“按钮点了但界面没变化”。
       this.invalidateStructuredPreviewCaches();
+      this.renderExpandDepthControl();
       this.renderPreview();
     });
 
     this.refs.collapseAllBtn.addEventListener("click", () => {
+      this.resetExpandDepthSelection();
       this.state.expandedIds = new Set();
       this.state.hasCustomExpansion = true;
       // 折叠全部和展开全部共享同一份可见行缓存约束；
       // 这里同样必须先清掉缓存，确保整棵树按新的展开态重建。
       this.invalidateStructuredPreviewCaches();
+      this.renderExpandDepthControl();
       this.renderPreview();
+    });
+
+    this.refs.expandDepthBtn.addEventListener("click", () => {
+      if (!this.canUseExpandDepthControl()) {
+        return;
+      }
+
+      this.state.isExpandDepthMenuOpen = !this.state.isExpandDepthMenuOpen;
+      this.renderExpandDepthControl();
+    });
+
+    this.refs.expandDepthMenu.addEventListener("click", (event) => {
+      const target = event.target instanceof HTMLElement ? event.target.closest("[data-expand-depth]") : null;
+
+      if (!(target instanceof HTMLElement)) {
+        return;
+      }
+
+      const depth = Number(target.getAttribute("data-expand-depth"));
+
+      if (!Number.isFinite(depth)) {
+        return;
+      }
+
+      this.applyExpandByDepth(depth);
     });
 
     this.refs.searchInput.addEventListener("input", () => {
@@ -2060,6 +2096,32 @@ class JsonPrismDeckApp {
     this.refs.previewContent.addEventListener("click", (event) => this.handlePreviewClick(event));
     this.refs.splitter.addEventListener("pointerdown", (event) => this.beginSplitterDrag(event));
     this.refs.splitter.addEventListener("keydown", (event) => this.handleSplitterKeydown(event));
+
+    document.addEventListener("pointerdown", (event) => {
+      if (!this.state.isExpandDepthMenuOpen) {
+        return;
+      }
+
+      if (!(event.target instanceof Node)) {
+        return;
+      }
+
+      if (this.refs.expandDepthBtn.contains(event.target) || this.refs.expandDepthMenu.contains(event.target)) {
+        return;
+      }
+
+      this.state.isExpandDepthMenuOpen = false;
+      this.renderExpandDepthControl();
+    });
+
+    window.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || !this.state.isExpandDepthMenuOpen) {
+        return;
+      }
+
+      this.state.isExpandDepthMenuOpen = false;
+      this.renderExpandDepthControl();
+    });
 
     window.addEventListener("pointermove", (event) => this.handleSplitterMove(event));
     window.addEventListener("pointerup", () => this.endSplitterDrag());
@@ -2501,6 +2563,18 @@ class JsonPrismDeckApp {
     this.state.nodes = result.nodes;
     this.state.rootId = result.rootId;
     this.state.expandableIds = new Set(result.expandableIds);
+    /**
+     * `metadata.maxDepth` 会把叶子节点层级也算进去；
+     * 但“展开层级”只影响容器节点，因此这里单独缓存“可展开容器的最大深度”，
+     * 用于裁剪候选项，避免出现选了也不会变化的无效层级。
+     */
+    this.state.maxExpandableDepth = result.nodes.reduce((maxDepth, node) => {
+      if (!node.expandable) {
+        return maxDepth;
+      }
+
+      return Math.max(maxDepth, node.depth);
+    }, 0);
     this.nodeMap = new Map(result.nodes.map((node) => [node.id, node]));
     this.rebuildFormattedRangeIndex();
     this.invalidateStructuredPreviewCaches();
@@ -2510,6 +2584,7 @@ class JsonPrismDeckApp {
       // 否则用户会看到上一份 JSON 残留的折叠状态，被误以为新数据不完整。
       this.state.expandedIds = new Set(result.expandableIds);
       this.state.hasCustomExpansion = false;
+      this.resetExpandDepthSelection();
     } else {
       this.state.expandedIds = new Set([...this.state.expandedIds].filter((id) => this.state.expandableIds.has(id)));
     }
@@ -2541,6 +2616,7 @@ class JsonPrismDeckApp {
     this.state.error = result.error;
     this.state.formattedText = "";
     this.state.nodes = [];
+    this.state.maxExpandableDepth = 0;
     this.state.expandableIds = new Set();
     this.state.expandedIds = new Set();
     this.state.hasCustomExpansion = false;
@@ -2575,6 +2651,7 @@ class JsonPrismDeckApp {
     this.state.error = null;
     this.state.formattedText = "";
     this.state.nodes = [];
+    this.state.maxExpandableDepth = 0;
     this.state.expandableIds = new Set();
     this.state.expandedIds = new Set();
     this.state.hasCustomExpansion = false;
@@ -2608,6 +2685,7 @@ class JsonPrismDeckApp {
       position: null,
     };
     this.state.nodes = [];
+    this.state.maxExpandableDepth = 0;
     this.state.metadata = this.state.text.length > 0
       ? {
           chars: this.state.text.length,
@@ -3014,6 +3092,110 @@ class JsonPrismDeckApp {
 
     this.invalidateStructuredPreviewCaches();
     this.renderPreview();
+  }
+
+  /**
+   * 根据当前最大深度生成“展开层级”候选项。
+   *
+   * @param {number | null | undefined} maxDepth 树最大深度。
+   * @return {number[]} 层级候选列表。
+   */
+  buildExpandDepthOptions(maxDepth) {
+    return buildExpandDepthOptionsByMaxDepth(maxDepth, this.state.maxExpandableDepth);
+  }
+
+  /**
+   * 判断层级展开控件当前是否可用。
+   *
+   * 控件只服务结构化预览（树形/文本），并依赖合法 JSON + 非 busy 状态 + 至少一层可展开深度；
+   * 否则弹层即使打开也没有有效动作，统一禁用并回到默认文案更不容易让用户误解。
+   *
+   * @return {boolean} 是否可用。
+   */
+  canUseExpandDepthControl() {
+    const isStructuredPreviewMode = this.state.valid && (this.state.previewMode === "tree" || this.state.previewMode === "text");
+    const hasExpandDepthOption = this.buildExpandDepthOptions(this.state.metadata?.maxDepth || 0).length > 0;
+    const isBusy = this.state.isProcessing || this.state.isEditorBusy;
+    return isStructuredPreviewMode && hasExpandDepthOption && !isBusy;
+  }
+
+  /**
+   * 重置层级展开选择。
+   *
+   * 展开全部、折叠全部和“贴新数据后默认全展开”都属于更高优先级动作；
+   * 这些场景必须清掉层级选择，避免按钮文案继续显示旧层级造成状态误读。
+   *
+   * @return {void}
+   */
+  resetExpandDepthSelection() {
+    this.state.selectedExpandDepth = null;
+    this.state.isExpandDepthMenuOpen = false;
+  }
+
+  /**
+   * 按指定层级应用展开状态。
+   *
+   * @param {number} depth 目标层级（从 1 开始）。
+   * @return {void}
+   */
+  applyExpandByDepth(depth) {
+    const targetDepth = Number.isFinite(depth) ? Math.max(1, Math.floor(depth)) : 1;
+    this.state.selectedExpandDepth = targetDepth;
+    this.state.isExpandDepthMenuOpen = false;
+    this.state.hasCustomExpansion = true;
+    this.state.expandedIds = pickExpandedIdsByDepth({
+      nodes: this.state.nodes,
+      expandableIds: this.state.expandableIds,
+      depth: targetDepth,
+      rootId: this.state.rootId,
+    });
+
+    this.invalidateStructuredPreviewCaches();
+    this.renderExpandDepthControl();
+    this.renderPreview();
+  }
+
+  /**
+   * 渲染“展开层级”按钮与下拉菜单。
+   *
+   * @return {void}
+   */
+  renderExpandDepthControl() {
+    const options = this.buildExpandDepthOptions(this.state.metadata?.maxDepth || 0);
+    const hasSelectedDepth = this.state.selectedExpandDepth !== null && options.includes(this.state.selectedExpandDepth);
+
+    if (this.state.selectedExpandDepth !== null && !hasSelectedDepth) {
+      this.state.selectedExpandDepth = null;
+    }
+
+    const canUse = this.canUseExpandDepthControl();
+
+    if (!canUse) {
+      this.state.isExpandDepthMenuOpen = false;
+    }
+
+    const shouldShowDefaultLabel = !canUse || this.state.selectedExpandDepth === null;
+    this.refs.expandDepthBtn.textContent = shouldShowDefaultLabel ? "展开层级" : `展开层级${this.state.selectedExpandDepth}`;
+    this.refs.expandDepthBtn.disabled = !canUse;
+    this.refs.expandDepthBtn.setAttribute("aria-expanded", canUse && this.state.isExpandDepthMenuOpen ? "true" : "false");
+
+    const fragment = document.createDocumentFragment();
+
+    for (const optionDepth of options) {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.className = "expand-depth-option";
+      option.dataset.expandDepth = String(optionDepth);
+      option.setAttribute("role", "option");
+      option.textContent = `展开层级${optionDepth}`;
+      const isActive = this.state.selectedExpandDepth === optionDepth;
+      option.classList.toggle("is-active", isActive);
+      option.setAttribute("aria-selected", isActive ? "true" : "false");
+      fragment.append(option);
+    }
+
+    this.refs.expandDepthMenu.replaceChildren(fragment);
+    this.refs.expandDepthMenu.classList.toggle("is-open", canUse && this.state.isExpandDepthMenuOpen);
   }
 
   /**
@@ -4131,6 +4313,7 @@ class JsonPrismDeckApp {
     this.refs.copyValueBtn.disabled = isBusy || !hasValidJson;
     this.refs.searchPrevBtn.disabled = isBusy || searchBusy || matchCount === 0;
     this.refs.searchNextBtn.disabled = isBusy || searchBusy || matchCount === 0;
+    this.renderExpandDepthControl();
   }
 
   /**
