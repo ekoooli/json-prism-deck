@@ -7,7 +7,7 @@ const STORAGE_KEY = "json-prism-deck-state";
 const DEFAULT_SAMPLE_TEXT = `{
   "workspace": {
     "name": "JSON Prism Deck",
-    "version": "1.0.3",
+    "version": "1.0.4",
     "features": [
       "tree-preview",
       "virtual-scroll",
