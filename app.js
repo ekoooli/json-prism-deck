@@ -4454,18 +4454,33 @@ class JsonPrismDeckApp {
   }
 
   /**
-   * 构造当前选中节点的可复制 JSON 文本。
+   * 构造当前选中节点的可复制文本。
    *
    * 复制值必须尽量在原始点击事件的同步阶段完成文本准备，
    * 否则等 worker 异步返回后再执行复制，Chromium 很容易把它判定为“非用户触发”而拒绝写入剪贴板。
    *
-   * @return {string} 当前选中节点的 JSON 文本。
+   * 输出策略按节点类型分两路：
+   * 1. 叶子字符串：直接返回字符串原始值（不走 JSON 序列化），让用户拿到的就是 `2026-01-12`
+   *    这样的“裸值”，避免最外层引号污染日期/ID/URL 等高频粘贴场景；
+   *    转义字符在这一步会被还原成真实字符（如 `\n` 变成换行），符合“复制即所见即所得”的预期。
+   * 2. 其他类型（对象/数组/数字/布尔/null）：仍然走 `stringifyJsonValue`，
+   *    保留合法 JSON 形态，方便用户直接粘贴回接口调试或测试数据。
+   *
+   * @return {string} 当前选中节点的可复制文本。
    * @throws {Error} 当前文本已失效或节点路径无法解析时抛错。
    */
   buildSelectedNodeValueText() {
     const targetPath = this.nodeMap.has(this.state.selectedNodeId) ? this.state.selectedNodeId : this.state.rootId;
     const rootValue = JSON.parse(this.refs.jsonEditor.value);
     const targetValue = resolveNodeValueByPath(rootValue, targetPath);
+
+    // 叶子字符串单独走裸值分支：JSON.stringify 会强制补最外层双引号并转义内部字符，
+    // 但“复制值”的使用场景多数是粘贴到表单、URL、SQL 或 IDE 字符串里，引号反而需要再手动删除。
+    // 容器节点（数组/对象）必须保持 JSON 形态，不能在这里误判。
+    if (typeof targetValue === "string") {
+      return targetValue;
+    }
+
     return stringifyJsonValue(targetValue, this.state.sortMode, this.state.indent, true);
   }
 
