@@ -1,6 +1,7 @@
 import { shouldReparseForSortChange } from "./sort-refresh-policy.js";
 import { unpackEmbeddedJsonText } from "./unpack-json-string.js";
 import { buildExpandDepthOptions as buildExpandDepthOptionsByMaxDepth, pickExpandedIdsByDepth } from "./expand-depth-policy.js";
+import { filterShallowPreviewSearchHits } from "./preview-search-policy.js";
 
 const STORAGE_KEY = "json-prism-deck-state";
 
@@ -1169,6 +1170,45 @@ class VirtualList {
   }
 
   /**
+   * 将预览容器垂直滚动复位到顶部，并驱动虚拟列表按新视口重绘。
+   *
+   * 不改变 JSON、展开态、选区与搜索；不强制复位 `scrollLeft`，避免用户为阅读超长行主动横滚后被误清。
+   *
+   * @return {void}
+   */
+  scrollPreviewViewportToTop() {
+    this.container.scrollTop = 0;
+
+    if (!this.staticMode) {
+      this.scheduleRender();
+    }
+  }
+
+  /**
+   * 将预览容器垂直滚动推到可滚动的最底部。
+   *
+   * 虚拟模式下总可滚高度与占位 `spacer` 一致，按 `items.length * rowHeight` 计算；
+   * 静态模式（元数据卡片、处理中、空态提示、原始错误预览等非虚拟挂载）则退回 `scrollHeight - clientHeight`，
+   * 以便底部栏同一套按钮覆盖所有预览形态。
+   *
+   * @return {void}
+   */
+  scrollPreviewViewportToBottom() {
+    if (this.staticMode) {
+      this.container.scrollTop = Math.max(0, this.container.scrollHeight - this.container.clientHeight);
+      return;
+    }
+
+    if (this.items.length === 0) {
+      this.container.scrollTop = 0;
+      return;
+    }
+
+    this.container.scrollTop = Math.max(0, this.items.length * this.rowHeight - this.container.clientHeight);
+    this.scheduleRender();
+  }
+
+  /**
    * 确保虚拟滚动结构仍挂在容器中。
    *
    * @return {void}
@@ -1449,6 +1489,8 @@ class JsonPrismDeckApp {
       expandDepthMenu: /** @type {HTMLElement} */ (getRequiredElement("expandDepthMenu")),
       searchPrevBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("searchPrevBtn")),
       searchNextBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("searchNextBtn")),
+      previewScrollTopBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("previewScrollTopBtn")),
+      previewScrollBottomBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("previewScrollBottomBtn")),
       copyPathBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("copyPathBtn")),
       copyValueBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("copyValueBtn")),
     };
@@ -2052,6 +2094,12 @@ class JsonPrismDeckApp {
     this.refs.searchNextBtn.addEventListener("click", () => this.navigateSearch(1));
     this.refs.searchPrevBtn.addEventListener("click", () => this.navigateSearch(-1));
 
+    this.refs.previewScrollTopBtn.addEventListener("click", () => {
+      this.previewList.scrollPreviewViewportToTop();
+    });
+    this.refs.previewScrollBottomBtn.addEventListener("click", () => {
+      this.previewList.scrollPreviewViewportToBottom();
+    });
     this.refs.copyPathBtn.addEventListener("click", () => void this.copySelectedPath());
     this.refs.copyValueBtn.addEventListener("click", () => void this.copySelectedValue());
 
@@ -2765,6 +2813,11 @@ class JsonPrismDeckApp {
   /**
    * 根据当前 query 更新搜索命中与自动展开祖先。
    *
+   * 预览命中分两套口径：
+   * - `searchMatchIdSet`：凡是 `searchText` 命中的节点都进集合，用于树/文本行高亮，以及沿命中链自动展开祖先；
+   * - `state.searchMatches`：只保留「全量命中里每个分支最浅的一层」，用于 `n/m` 计数与上下键跳转。
+   *   否则键名会写进所有子孙的 `path`，同一键在 UI 上被重复计 m 次，但用户语义上只是一处定义。
+   *
    * @return {void}
    */
   updateSearchResults() {
@@ -2797,25 +2850,57 @@ class JsonPrismDeckApp {
       }
     }
 
-    this.state.searchMatches = matches;
+    const navigationMatches = filterShallowPreviewSearchHits(matches, this.nodeMap);
+
+    this.state.searchMatches = navigationMatches;
     this.searchMatchIdSet = new Set(matches);
     this.state.autoExpandedIds = ancestors;
     this.invalidateStructuredPreviewCaches();
 
-    if (matches.length === 0) {
+    if (navigationMatches.length === 0) {
       this.state.currentMatchIndex = 0;
       return;
     }
 
-    const existingIndex = matches.indexOf(this.state.selectedNodeId);
+    let existingIndex = navigationMatches.indexOf(this.state.selectedNodeId);
+
+    if (existingIndex === -1) {
+      let cursor = this.nodeMap.get(this.state.selectedNodeId);
+
+      while (cursor?.parentId) {
+        const parent = this.nodeMap.get(cursor.parentId);
+
+        if (!parent) {
+          break;
+        }
+
+        const parentIndex = navigationMatches.indexOf(parent.id);
+
+        if (parentIndex !== -1) {
+          existingIndex = parentIndex;
+          break;
+        }
+
+        cursor = parent;
+      }
+    }
 
     if (existingIndex !== -1) {
       this.state.currentMatchIndex = existingIndex;
+
+      const anchorId = navigationMatches[existingIndex];
+
+      // 选区若落在仅因路径继承而命中的子节点上，导航口径已上卷到浅层命中节点；
+      // 不把 `selectedNodeId` 同步过去的话，文本预览里 `is-search-current` 会对不上「当前第几个」。
+      if (anchorId && anchorId !== this.state.selectedNodeId) {
+        this.state.selectedNodeId = anchorId;
+      }
+
       return;
     }
 
     this.state.currentMatchIndex = 0;
-    this.state.selectedNodeId = matches[0];
+    this.state.selectedNodeId = navigationMatches[0];
   }
 
   /**
@@ -4309,6 +4394,9 @@ class JsonPrismDeckApp {
     this.refs.downloadBtn.disabled = !hasText;
     this.refs.expandAllBtn.disabled = isBusy || !structuredPreviewMode;
     this.refs.collapseAllBtn.disabled = isBusy || !structuredPreviewMode;
+    const canPreviewScroll = !isBusy && !this.state.empty;
+    this.refs.previewScrollTopBtn.disabled = !canPreviewScroll;
+    this.refs.previewScrollBottomBtn.disabled = !canPreviewScroll;
     this.refs.copyPathBtn.disabled = isBusy || !hasValidJson;
     this.refs.copyValueBtn.disabled = isBusy || !hasValidJson;
     this.refs.searchPrevBtn.disabled = isBusy || searchBusy || matchCount === 0;

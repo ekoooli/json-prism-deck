@@ -1433,20 +1433,82 @@ body[data-theme="night"] .syntax-search-current {
 }
 
 .selection-actions .tool-btn {
-  min-height: auto;
-  padding: 0 3px;
+  min-height: 24px;
+  padding: 0 4px;
   border: 0;
   background: transparent;
   color: var(--text-soft);
   font-size: 0.74rem;
   font-weight: 500;
+  line-height: 1.2;
+  box-sizing: border-box;
 }
 
-.selection-actions .tool-btn:hover {
+/*
+ * 滚动按钮：全局 .tool-btn 带 justify-content:center，窄按钮里图标与文字会像「两块」各自居中而显得不齐；
+ * 这里改成左对齐编组（文案在左、箭头在右）+ 固定行框，并用轻微胶囊底与箭头盒统一视觉重心。
+ */
+.selection-actions .selection-scroll-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 2px;
+  padding: 0 8px 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--stroke);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0.22));
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.45) inset;
+}
+
+body[data-theme="night"] .selection-actions .selection-scroll-btn {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset;
+}
+
+.selection-actions .selection-scroll-icon {
+  flex: 0 0 auto;
+  width: 1rem;
+  height: 1rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  font-size: 0.62rem;
+  font-weight: 800;
+  line-height: 1.5;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+/* 箭头字形在默认字体里常略微偏上/偏下，做 1px 级光学对齐，避免和中文标签看起来「不在一条基线」上。 */
+.selection-actions .selection-scroll-icon--up {
+  transform: translateY(0.5px);
+}
+
+.selection-actions .selection-scroll-icon--down {
+  transform: translateY(-0.5px);
+}
+
+.selection-actions .selection-scroll-label {
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.selection-actions .tool-btn:not(.selection-scroll-btn):hover {
   transform: none;
   border: 0;
   background: transparent;
   color: var(--accent-strong);
+}
+
+.selection-actions .selection-scroll-btn:hover {
+  border: 1px solid var(--stroke-strong);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.38));
+  color: var(--accent-strong);
+}
+
+body[data-theme="night"] .selection-actions .selection-scroll-btn:hover {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.04));
 }
 
 .empty-state {
