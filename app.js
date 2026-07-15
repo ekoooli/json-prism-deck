@@ -8,7 +8,7 @@ const STORAGE_KEY = "json-prism-deck-state";
 const DEFAULT_SAMPLE_TEXT = `{
   "workspace": {
     "name": "JSON Prism Deck",
-    "version": "1.0.4",
+    "version": "1.0.5",
     "features": [
       "tree-preview",
       "virtual-scroll",
@@ -308,41 +308,6 @@ function cloneSearchExpression(searchPlan) {
   }
 
   return new RegExp(searchPlan.expression.source, searchPlan.expression.flags);
-}
-
-/**
- * 计算文本是否至少存在一个可见搜索命中。
- *
- * 零宽正则在编辑器语义里是合法的，但在本工具的树和文本高亮里无法直观展示，
- * 所以这里只认“可见字符跨度”的命中，避免出现计数有结果、界面却完全无高亮的错觉。
- *
- * @param {string} text 原始文本。
- * @param {SearchPlan | null} searchPlan 搜索计划。
- * @return {boolean} 是否存在可见命中。
- */
-function hasSearchMatch(text, searchPlan) {
-  if (!text || !searchPlan?.query || searchPlan.error) {
-    return false;
-  }
-
-  const expression = cloneSearchExpression(searchPlan);
-
-  if (!expression) {
-    return false;
-  }
-
-  let match = expression.exec(text);
-
-  while (match) {
-    if (match[0]) {
-      return true;
-    }
-
-    expression.lastIndex = match.index + 1;
-    match = expression.exec(text);
-  }
-
-  return false;
 }
 
 /**
@@ -1011,11 +976,11 @@ class StorageBridge {
  */
 class WorkerBridge {
   /**
-   * @param {string} workerUrl worker 文件 URL。
+   * @param {Worker} worker 已启动的 JSON 处理 worker。
    */
-  constructor(workerUrl) {
+  constructor(worker) {
     /** @type {Worker} */
-    this.worker = new Worker(workerUrl);
+    this.worker = worker;
     /** @type {Map<string, { resolve: (value: any) => void, reject: (error: Error) => void }>} */
     this.pending = new Map();
     /** @type {number} */
@@ -4739,7 +4704,7 @@ class JsonPrismDeckApp {
 
     try {
       helper.focus({ preventScroll: true });
-    } catch (error) {
+    } catch {
       helper.focus();
     }
 
@@ -4767,7 +4732,7 @@ class JsonPrismDeckApp {
       if (activeElement) {
         try {
           activeElement.focus({ preventScroll: true });
-        } catch (error) {
+        } catch {
           activeElement.focus();
         }
       }
@@ -4933,7 +4898,8 @@ class JsonPrismDeckApp {
 
 const app = new JsonPrismDeckApp({
   storage: new StorageBridge(STORAGE_KEY),
-  worker: new WorkerBridge(chrome.runtime.getURL("json-worker.js")),
+  // 采用 Vite 可静态识别的 Worker 入口，构建后会跟随页面产物重写 URL，避免手写文件名在 hash 输出下失效。
+  worker: new WorkerBridge(new Worker(new URL("./json-worker.js", import.meta.url), { type: "module" })),
   previewList: new VirtualList(/** @type {HTMLElement} */ (getRequiredElement("previewContent"))),
 });
 

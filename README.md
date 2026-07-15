@@ -2,9 +2,8 @@
 
 一个可直接加载到 Chrome 的 Manifest V3 JSON 格式化预览插件。
 
-当前版本：`1.0.4`
-
-更新记录见：[更新记录.md](/Users/rcc/Personal/json-extensions/更新记录.md)
+当前版本：`1.0.5`
+更新记录见：[更新记录.md](更新记录.md)
 
 ## 功能
 
@@ -23,8 +22,28 @@
 1. 打开 Chrome，进入 `chrome://extensions/`
 2. 打开右上角“开发者模式”
 3. 点击“加载已解压的扩展程序”
-4. 选择当前目录 `/Users/rcc/Personal/json-extensions`
+4. 执行 `npm run build` 后，选择当前目录下的 `dist`
 5. 加载完成后点击工具栏图标，即可打开 `chrome-extension://.../index.html`
+
+## 开发与发布
+
+```bash
+npm ci
+npm run dev
+npm run verify
+```
+
+正式发布时，先人工补齐 `更新记录.md` 中 `## X.Y.Z - YYYY-MM-DD` 的版本说明，再执行：
+
+```bash
+npm run release:prepare -- X.Y.Z
+git add .
+git commit -m "chore(release): publish vX.Y.Z"
+git tag -a vX.Y.Z -m "release vX.Y.Z"
+git push origin main --follow-tags
+```
+
+GitHub Actions 会校验 tag、版本文件和更新记录一致性，自动构建 `json-prism-deck-vX.Y.Z.zip`、生成 SHA-256 校验文件，并创建同名正式 Release。
 
 ## 快捷键
 

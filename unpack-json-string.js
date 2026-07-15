@@ -52,7 +52,7 @@ function extractEmbeddedJsonValue(text) {
 export function canUnpackEmbeddedJson(text) {
   try {
     return extractEmbeddedJsonValue(text) !== null;
-  } catch (error) {
+  } catch {
     return false;
   }
 }
@@ -70,7 +70,7 @@ export function unpackEmbeddedJsonText(text, options) {
 
   try {
     unpackedValue = extractEmbeddedJsonValue(text);
-  } catch (error) {
+  } catch {
     throw new Error("当前内容不属于可解包的 JSON 字符串。");
   }
 

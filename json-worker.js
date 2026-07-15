@@ -26,13 +26,6 @@ let currentText = "";
 let currentValueByPath = new Map();
 
 /**
- * worker 当前预览所使用的排序模式。
- *
- * @type {"source" | "asc" | "desc"}
- */
-let currentSortMode = "source";
-
-/**
  * 获取 JSON 值的稳定类型名。
  *
  * @param {unknown} value 待判断的 JSON 值。
@@ -477,7 +470,6 @@ function buildSuccessPayload(sortMode, indent) {
   const textStats = buildTextStats(currentText);
   const formattedStats = buildTextStats(formattedText);
 
-  currentSortMode = sortMode;
   currentValueByPath = tree.valueByPath;
 
   return {
@@ -525,8 +517,6 @@ function handleParse(payload) {
   } catch (error) {
     currentValue = null;
     currentValueByPath = new Map();
-    currentSortMode = "source";
-
     return {
       ok: false,
       metadata: buildTextStats(payload.text),

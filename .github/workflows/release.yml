@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Derive release version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify release metadata
+        run: npm run release:verify -- "$GITHUB_REF_NAME"
+
+      - name: Lint source
+        run: npm run lint
+
+      - name: Run tests
+        run: npm run test
+
+      - name: Build extension
+        run: npm run build
+
+      - name: Verify distribution directory
+        run: npm run verify:dist
+
+      - name: Extract release notes
+        run: npm run release:notes -- "$VERSION" > release-notes.md
+
+      - name: Create release archive
+        run: |
+          cd dist
+          zip -r "../json-prism-deck-v${VERSION}.zip" .
+
+      - name: Generate archive checksum
+        run: shasum -a 256 "json-prism-deck-v${VERSION}.zip" > "json-prism-deck-v${VERSION}.sha256"
+
+      - name: Create or update GitHub Release
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --title "JSON Prism Deck v${VERSION}" --notes-file release-notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" --title "JSON Prism Deck v${VERSION}" --notes-file release-notes.md
+          fi
+          gh release upload "$GITHUB_REF_NAME" "json-prism-deck-v${VERSION}.zip" "json-prism-deck-v${VERSION}.sha256" --clobber
