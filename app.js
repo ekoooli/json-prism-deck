@@ -8,7 +8,7 @@ const STORAGE_KEY = "json-prism-deck-state";
 const DEFAULT_SAMPLE_TEXT = `{
   "workspace": {
     "name": "JSON Prism Deck",
-    "version": "1.0.5",
+    "version": "1.0.6",
     "features": [
       "tree-preview",
       "virtual-scroll",
@@ -53,13 +53,14 @@ const DEFAULT_SETTINGS = {
   theme: "dawn",
   previewMode: "text",
   sortMode: "source",
-  workspaceRatio: 0.48,
+  workspaceRatio: 0.4,
   searchQuery: "",
   searchTarget: "preview",
   searchCaseSensitive: false,
   searchWholeWord: false,
   searchRegex: false,
-  editorMode: "full",
+  editorMode: "lite",
+  showTreePath: true,
   editorFontSize: 15,
   previewFontSize: 14,
 };
@@ -930,8 +931,8 @@ function buildJsonSyntaxFragment(line, errorColumn = null, searchRanges = []) {
 /**
  * 存储桥接层。
  *
- * 这里故意改用 `sessionStorage` 而不是扩展级共享存储，
- * 这样每个插件 tab 都拥有自己的独立会话，不会把上一页的 JSON、搜索词或预览模式串到新开的页面里。
+ * JSON 文本、搜索条件和布局仍故意使用 `sessionStorage`，避免多个插件 tab 互相覆盖工作现场；
+ * 只有树形路径这种纯展示偏好会单独写进 `localStorage`，使用户新开 tab 时继续沿用显示选择。
  */
 class StorageBridge {
   /**
@@ -965,6 +966,46 @@ class StorageBridge {
    */
   async save(snapshot) {
     sessionStorage.setItem(this.storageKey, JSON.stringify(snapshot));
+  }
+
+  /**
+   * 读取跨 tab 共享的树形路径显示偏好。
+   *
+   * sessionStorage 无法跨 tab 传递，导致用户在一个工作台隐藏路径后新开页面又看到路径；
+   * 这里仅共享不含业务载荷的布尔展示设置，保留编辑内容和搜索状态的原有隔离边界。
+   *
+   * @return {Promise<boolean | null>} 已保存偏好；未保存或读取失败时返回 null。
+   */
+  async loadTreePathPreference() {
+    try {
+      const raw = localStorage.getItem(`${this.storageKey}-tree-path-visible`);
+
+      if (raw === null) {
+        return null;
+      }
+
+      return raw !== "false";
+    } catch (error) {
+      console.warn("无法读取共享路径显示偏好，已回退到当前 tab 会话状态。", error);
+      return null;
+    }
+  }
+
+  /**
+   * 保存跨 tab 共享的树形路径显示偏好。
+   *
+   * 写入失败不阻断当前 tab 的即时切换，失败仅意味着新 tab 会回退默认显示路径；
+   * 这样存储权限异常不会影响 JSON 预览本身。
+   *
+   * @param {boolean} visible 是否显示路径列。
+   * @return {Promise<void>}
+   */
+  async saveTreePathPreference(visible) {
+    try {
+      localStorage.setItem(`${this.storageKey}-tree-path-visible`, visible ? "true" : "false");
+    } catch (error) {
+      console.warn("无法保存共享路径显示偏好，新 tab 将回退默认设置。", error);
+    }
   }
 }
 
@@ -1452,6 +1493,7 @@ class JsonPrismDeckApp {
       collapseAllBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("collapseAllBtn")),
       expandDepthBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("expandDepthBtn")),
       expandDepthMenu: /** @type {HTMLElement} */ (getRequiredElement("expandDepthMenu")),
+      treePathToggleBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("treePathToggleBtn")),
       searchPrevBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("searchPrevBtn")),
       searchNextBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("searchNextBtn")),
       previewScrollTopBtn: /** @type {HTMLButtonElement} */ (getRequiredElement("previewScrollTopBtn")),
@@ -1485,6 +1527,7 @@ class JsonPrismDeckApp {
     this.applyEditorMode(this.state.editorMode);
     this.renderEditorBusyState();
     this.applyPreviewModeButtons();
+    this.renderTreePathToggle();
     this.renderExpandDepthControl();
     this.refreshSearchPlan();
     this.renderSearchTargetControl();
@@ -1987,6 +2030,7 @@ class JsonPrismDeckApp {
       button.addEventListener("click", () => {
         this.state.previewMode = /** @type {"tree" | "text" | "meta"} */ (button.getAttribute("data-preview-mode"));
         this.applyPreviewModeButtons();
+        this.renderTreePathToggle();
         this.renderPreview();
         this.renderSummary();
         this.updateActionAvailability();
@@ -2039,6 +2083,20 @@ class JsonPrismDeckApp {
       }
 
       this.applyExpandByDepth(depth);
+    });
+
+    this.refs.treePathToggleBtn.addEventListener("click", () => {
+      if (this.state.previewMode !== "tree") {
+        return;
+      }
+
+      // 路径只影响树行的展示列，不应重置展开态、选中节点或搜索结果；
+      // 因此直接重绘当前视图并持久化用户偏好即可。
+      this.state.showTreePath = !this.state.showTreePath;
+      void this.storage.saveTreePathPreference(this.state.showTreePath);
+      this.renderTreePathToggle();
+      this.renderPreview();
+      this.schedulePersist();
     });
 
     this.refs.searchInput.addEventListener("input", () => {
@@ -2149,7 +2207,10 @@ class JsonPrismDeckApp {
    * @return {Promise<void>}
    */
   async restoreState() {
-    const stored = await this.storage.load();
+    const [stored, sharedTreePath] = await Promise.all([
+      this.storage.load(),
+      this.storage.loadTreePathPreference(),
+    ]);
 
     this.state.text = typeof stored.text === "string" ? stored.text : DEFAULT_SETTINGS.text;
     this.state.indent = stored.indent === 4 ? 4 : 2;
@@ -2163,7 +2224,8 @@ class JsonPrismDeckApp {
     this.state.searchCaseSensitive = Boolean(stored.searchCaseSensitive);
     this.state.searchWholeWord = Boolean(stored.searchWholeWord);
     this.state.searchRegex = Boolean(stored.searchRegex);
-    this.state.editorMode = stored.editorMode === "lite" ? "lite" : "full";
+    this.state.editorMode = stored.editorMode === "full" ? "full" : "lite";
+    this.state.showTreePath = sharedTreePath === null ? stored.showTreePath !== false : sharedTreePath;
     this.state.editorFontSize = clamp(Number(stored.editorFontSize) || DEFAULT_SETTINGS.editorFontSize, FONT_LIMITS.editor.min, FONT_LIMITS.editor.max);
     this.state.previewFontSize = clamp(Number(stored.previewFontSize) || DEFAULT_SETTINGS.previewFontSize, FONT_LIMITS.preview.min, FONT_LIMITS.preview.max);
   }
@@ -2187,6 +2249,7 @@ class JsonPrismDeckApp {
       searchWholeWord: this.state.searchWholeWord,
       searchRegex: this.state.searchRegex,
       editorMode: this.state.editorMode,
+      showTreePath: this.state.showTreePath,
       editorFontSize: this.state.editorFontSize,
       previewFontSize: this.state.previewFontSize,
     });
@@ -3249,6 +3312,23 @@ class JsonPrismDeckApp {
   }
 
   /**
+   * 渲染树形路径显示开关。
+   *
+   * 路径列仅属于树形预览；在文本和元数据模式保留这个按钮会制造“切了却没变化”的错觉。
+   * 偏好即使暂时不可见也继续保留，用户回到树形时能得到上次主动选择的展示密度。
+   *
+   * @return {void}
+   */
+  renderTreePathToggle() {
+    const isTreeMode = this.state.previewMode === "tree";
+
+    this.refs.treePathToggleBtn.hidden = !isTreeMode;
+    this.refs.treePathToggleBtn.disabled = !isTreeMode;
+    this.refs.treePathToggleBtn.textContent = this.state.showTreePath ? "隐藏路径" : "显示路径";
+    this.refs.treePathToggleBtn.setAttribute("aria-pressed", this.state.showTreePath ? "true" : "false");
+  }
+
+  /**
    * 判断节点在当前视图下是否处于展开状态。
    *
    * 搜索命中的祖先会被 `autoExpandedIds` 强制撑开，确保结果始终可见；
@@ -3332,6 +3412,7 @@ class JsonPrismDeckApp {
    *   nodeId: string | null,
    *   text: string,
    *   meta: string,
+   *   inlineMeta: string,
    *   isToggleRow: boolean,
    *   expanded: boolean
    * }>} 可见代码行模型。
@@ -3356,6 +3437,7 @@ class JsonPrismDeckApp {
      *   nodeId: string | null,
      *   text: string,
      *   meta?: string,
+     *   inlineMeta?: string,
      *   isToggleRow?: boolean,
      *   expanded?: boolean
      * }} row 行内容。
@@ -3371,6 +3453,7 @@ class JsonPrismDeckApp {
         nodeId: row.nodeId,
         text: row.text,
         meta: row.meta || "",
+        inlineMeta: row.inlineMeta || "",
         isToggleRow: Boolean(row.isToggleRow),
         expanded: Boolean(row.expanded),
       });
@@ -3398,6 +3481,7 @@ class JsonPrismDeckApp {
         appendRow({
           nodeId: node.id,
           text: openLine,
+          inlineMeta: node.expandable ? node.metaLabel : "",
         });
         return;
       }
@@ -3406,6 +3490,7 @@ class JsonPrismDeckApp {
         appendRow({
           nodeId: node.id,
           text: this.buildCollapsedTextLine(node, openLine, closeLine),
+          inlineMeta: node.expandable ? node.metaLabel : "",
           isToggleRow: true,
           expanded: false,
         });
@@ -3415,6 +3500,7 @@ class JsonPrismDeckApp {
       appendRow({
         nodeId: node.id,
         text: openLine,
+        inlineMeta: node.expandable ? node.metaLabel : "",
         isToggleRow: true,
         expanded: true,
       });
@@ -4134,10 +4220,6 @@ class JsonPrismDeckApp {
       value.append(buildHighlightedFragment(node.preview, searchPlan));
     }
 
-    const path = document.createElement("span");
-    path.className = "tree-path";
-    path.append(buildHighlightedFragment(node.path, searchPlan));
-
     content.append(toggle);
 
     if (node.keyLabel) {
@@ -4153,7 +4235,13 @@ class JsonPrismDeckApp {
       content.append(meta);
     }
 
-    content.append(path);
+    if (this.state.showTreePath) {
+      const path = document.createElement("span");
+      path.className = "tree-path";
+      path.append(buildHighlightedFragment(node.path, searchPlan));
+      content.append(path);
+    }
+
     element.append(number, content);
     return element;
   }
@@ -4209,6 +4297,7 @@ class JsonPrismDeckApp {
    *   nodeId: string | null,
    *   text: string,
    *   meta: string,
+   *   inlineMeta: string,
    *   isToggleRow: boolean,
    *   expanded: boolean
    * }} row 行数据。
@@ -4273,6 +4362,14 @@ class JsonPrismDeckApp {
     const content = document.createElement("span");
     content.className = "raw-line-content";
     content.append(buildJsonSyntaxFragment(row.text, null, searchRanges));
+
+    if (row.inlineMeta) {
+      const inlineMeta = document.createElement("span");
+      inlineMeta.className = "meta-pill text-container-meta";
+      inlineMeta.textContent = row.inlineMeta;
+      content.append(inlineMeta);
+    }
+
     code.append(content);
 
     const meta = document.createElement("div");
@@ -4366,6 +4463,7 @@ class JsonPrismDeckApp {
     this.refs.copyValueBtn.disabled = isBusy || !hasValidJson;
     this.refs.searchPrevBtn.disabled = isBusy || searchBusy || matchCount === 0;
     this.refs.searchNextBtn.disabled = isBusy || searchBusy || matchCount === 0;
+    this.renderTreePathToggle();
     this.renderExpandDepthControl();
   }
 

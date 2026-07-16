@@ -84,8 +84,8 @@
                 <div class="panel-title-group">
                   <h2>编辑区</h2>
                   <div class="segmented editor-mode-switch" role="group" aria-label="编辑区模式">
-                    <button id="editorModeFullBtn" class="segment-btn is-active" type="button">完整</button>
-                    <button id="editorModeLiteBtn" class="segment-btn" type="button">精简</button>
+                    <button id="editorModeFullBtn" class="segment-btn" type="button">完整</button>
+                    <button id="editorModeLiteBtn" class="segment-btn is-active" type="button">精简</button>
                   </div>
                 </div>
                 <div class="panel-actions">
@@ -156,6 +156,7 @@
                     </button>
                     <div id="expandDepthMenu" class="expand-depth-menu" role="listbox" aria-label="展开层级选项"></div>
                   </div>
+                  <button id="treePathToggleBtn" class="tool-btn" type="button" aria-pressed="true">隐藏路径</button>
                 </div>
               </header>
 
@@ -200,7 +201,7 @@
           <section class="toolbar-section">
             <div class="toolbar-group">
               <button id="formatBtn" class="tool-btn primary">格式化</button>
-              <button id="unpackFormatBtn" class="tool-btn">解包格式化</button>
+              <button id="unpackFormatBtn" class="tool-btn">JSON字符串格式化</button>
               <button id="sortFormatBtn" class="tool-btn">按预览排序格式化</button>
               <div class="toolbar-action-grid" aria-label="辅助操作">
                 <button id="minifyBtn" class="tool-btn toolbar-compact-btn">压缩</button>

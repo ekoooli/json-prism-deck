@@ -55,3 +55,45 @@ test("preview mode defaults to text and restoreState forces text even when sessi
    */
   assert.match(source, /this\.state\.previewMode\s*=\s*"text";/);
 });
+
+test("editor defaults to lite while preserving an explicitly stored mode", () => {
+  const html = readWorkbenchHtml();
+  const source = readAppSource();
+
+  assert.match(html, /<button id="editorModeLiteBtn" class="segment-btn is-active" type="button">精简<\/button>/);
+  assert.match(source, /editorMode:\s*"lite"/);
+
+  /**
+   * 只有用户明确保存过完整模式时才恢复完整模式；缺失历史字段必须回退精简，
+   * 才能同时满足“首次默认精简”和“尊重用户手动选择”两个约束。
+   */
+  assert.match(source, /stored\.editorMode\s*===\s*"full"\s*\?\s*"full"\s*:\s*"lite"/);
+});
+
+test("tree path toggle is tree-only and persists the display preference across tabs", () => {
+  const html = readWorkbenchHtml();
+  const source = readAppSource();
+
+  assert.match(html, /id="treePathToggleBtn"/);
+  assert.match(source, /showTreePath:\s*true/);
+  assert.match(source, /loadTreePathPreference/);
+  assert.match(source, /saveTreePathPreference/);
+  assert.match(source, /sharedTreePath\s*===\s*null\s*\?\s*stored\.showTreePath\s*!==\s*false\s*:\s*sharedTreePath/);
+  assert.match(source, /showTreePath:\s*this\.state\.showTreePath/);
+  assert.match(source, /this\.refs\.treePathToggleBtn\.hidden\s*=\s*!isTreeMode/);
+});
+
+test("workspace defaults to a 4-to-6 editor and preview split", () => {
+  const source = readAppSource();
+  const styles = fs.readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+
+  assert.match(source, /workspaceRatio:\s*0\.4/);
+  assert.match(styles, /--workspace-ratio:\s*0\.4/);
+});
+
+test("text preview attaches container count labels next to the JSON line", () => {
+  const source = readAppSource();
+
+  assert.match(source, /inlineMeta:\s*node\.expandable\s*\?\s*node\.metaLabel\s*:\s*""/);
+  assert.match(source, /text-container-meta/);
+});

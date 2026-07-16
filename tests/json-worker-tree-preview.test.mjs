@@ -12,7 +12,7 @@ import vm from "node:vm";
  *
  * @return {{
  *   buildLeafPreview: (value: unknown) => { preview: string, metaLabel: string },
- *   buildTree: (rootValue: unknown, sortMode: "source" | "asc" | "desc") => { nodes: Array<{ id: string, searchText: string, preview: string }> }
+ *   buildTree: (rootValue: unknown, sortMode: "source" | "asc" | "desc") => { nodes: Array<{ id: string, searchText: string, preview: string, childCount: number, metaLabel: string }> }
  * }} worker 内部测试钩子。
  */
 function loadWorkerPreviewApi() {
@@ -56,4 +56,19 @@ test("tree search text keeps the long string content instead of the shortened el
    * 否则用户即使已经看到完整值，也无法搜索到 88 个字符之后的片段。
    */
   assert.equal(leaf.searchText.includes("FA5A753E3DD6C210519AB142B29F912176A25C5310EBD50A528DBE529DC7E56963A12"), true);
+});
+
+test("container nodes expose field and item counts for tree and text previews", () => {
+  const { buildTree } = loadWorkerPreviewApi();
+  const tree = buildTree({ workspace: { name: "Deck", enabled: true }, records: [1, 2, 3], empty: {} }, "source");
+  const workspace = tree.nodes.find((node) => node.id === "$.workspace");
+  const records = tree.nodes.find((node) => node.id === "$.records");
+  const empty = tree.nodes.find((node) => node.id === "$.empty");
+
+  assert.equal(workspace?.childCount, 2);
+  assert.equal(workspace?.metaLabel, "2 个字段");
+  assert.equal(records?.childCount, 3);
+  assert.equal(records?.metaLabel, "3 项");
+  assert.equal(empty?.childCount, 0);
+  assert.equal(empty?.metaLabel, "0 个字段");
 });

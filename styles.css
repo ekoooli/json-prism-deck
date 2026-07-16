@@ -22,7 +22,7 @@
   --grid-gap: 8px;
   --panel-radius: 18px;
   --split-size: 10px;
-  --workspace-ratio: 0.48;
+  --workspace-ratio: 0.4;
   --editor-font-size: 15px;
   --editor-line-height: 25px;
   --preview-tree-font-size: 14px;
@@ -1281,6 +1281,20 @@ body[data-theme="night"] .preview-content {
   text-overflow: clip;
   white-space: pre;
   user-select: text;
+}
+
+.text-container-meta {
+  /*
+   * 容器计数必须属于同一段可横向滚动的代码内容，才能始终紧贴 `{`、`}`、`[`、`]`；
+   * 如果放进右侧独立列，长字段行会把标签固定到视口边缘，失去“该容器有多少项”的对应关系。
+   */
+  margin-left: 7px;
+  gap: 0;
+  padding: 2px 6px;
+  vertical-align: middle;
+  white-space: normal;
+  font-size: 0.66rem;
+  line-height: 1.15;
 }
 
 .raw-line-toggle {
