@@ -1,7 +1,7 @@
-import { shouldReparseForSortChange } from "./sort-refresh-policy.js";
-import { unpackEmbeddedJsonText } from "./unpack-json-string.js";
-import { buildExpandDepthOptions as buildExpandDepthOptionsByMaxDepth, pickExpandedIdsByDepth } from "./expand-depth-policy.js";
-import { filterShallowPreviewSearchHits } from "./preview-search-policy.js";
+import { shouldReparseForSortChange } from "../shared/sort-refresh-policy.js";
+import { unpackEmbeddedJsonText } from "../shared/unpack-json-string.js";
+import { buildExpandDepthOptions as buildExpandDepthOptionsByMaxDepth, pickExpandedIdsByDepth } from "../shared/expand-depth-policy.js";
+import { filterShallowPreviewSearchHits } from "../shared/preview-search-policy.js";
 
 const STORAGE_KEY = "json-prism-deck-state";
 
@@ -4997,7 +4997,7 @@ class JsonPrismDeckApp {
 const app = new JsonPrismDeckApp({
   storage: new StorageBridge(STORAGE_KEY),
   // 采用 Vite 可静态识别的 Worker 入口，构建后会跟随页面产物重写 URL，避免手写文件名在 hash 输出下失效。
-  worker: new WorkerBridge(new Worker(new URL("./json-worker.js", import.meta.url), { type: "module" })),
+  worker: new WorkerBridge(new Worker(new URL("../workers/json-worker.js", import.meta.url), { type: "module" })),
   previewList: new VirtualList(/** @type {HTMLElement} */ (getRequiredElement("previewContent"))),
 });
 

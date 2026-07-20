@@ -36,8 +36,8 @@ export function verifyReleaseMetadata({ rootDir = ROOT_DIR, tag } = {}) {
   const packageJson = readJsonObject(resolve(rootDir, "package.json"));
   const manifest = readJsonObject(resolve(rootDir, "manifest.json"));
   const readme = readFileSync(resolve(rootDir, "README.md"), "utf8");
-  const appSource = readFileSync(resolve(rootDir, "app.js"), "utf8");
-  const changelog = readFileSync(resolve(rootDir, "更新记录.md"), "utf8");
+  const appSource = readFileSync(resolve(rootDir, "src/workbench/main.js"), "utf8");
+  const changelog = readFileSync(resolve(rootDir, "CHANGELOG.md"), "utf8");
   const version = String(packageJson.version ?? "");
 
   assertStableVersion(version);
@@ -45,7 +45,7 @@ export function verifyReleaseMetadata({ rootDir = ROOT_DIR, tag } = {}) {
   const comparedVersions = {
     "manifest.json": String(manifest.version ?? ""),
     "README.md": readReadmeVersion(readme),
-    "app.js 示例": readSampleVersion(appSource),
+    "src/workbench/main.js 示例": readSampleVersion(appSource),
   };
 
   for (const [source, sourceVersion] of Object.entries(comparedVersions)) {

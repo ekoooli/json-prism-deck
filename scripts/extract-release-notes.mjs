@@ -15,7 +15,7 @@ const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
  * @return {string} 版本对应的 Markdown 正文。
  */
 export function getReleaseNotes({ rootDir = ROOT_DIR, version }) {
-  return extractReleaseNotes(readFileSync(resolve(rootDir, "更新记录.md"), "utf8"), version);
+  return extractReleaseNotes(readFileSync(resolve(rootDir, "CHANGELOG.md"), "utf8"), version);
 }
 
 /**

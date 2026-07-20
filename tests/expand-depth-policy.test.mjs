@@ -2,15 +2,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 
-import { buildExpandDepthOptions, pickExpandedIdsByDepth } from "../expand-depth-policy.js";
+import { buildExpandDepthOptions, pickExpandedIdsByDepth } from "../src/shared/expand-depth-policy.js";
 
 /**
  * 读取主线程脚本源码，校验关键优先级约束没有回退。
  *
- * @return {string} `app.js` 源码。
+ * @return {string} `src/workbench/main.js` 源码。
  */
 function readAppSource() {
-  return fs.readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  return fs.readFileSync(new URL("../src/workbench/main.js", import.meta.url), "utf8");
 }
 
 test("buildExpandDepthOptions returns depth options from 1 to maxDepth", () => {

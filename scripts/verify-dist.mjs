@@ -47,7 +47,7 @@ export function verifyDistribution({ rootDir = ROOT_DIR } = {}) {
     throw new Error(`dist/manifest.json 版本为 ${manifest.version}，必须与 package.json 的 ${version} 一致。`);
   }
 
-  assertDistFile(distDir, "index.html", "扩展页面");
+  assertDistFile(distDir, manifest.options_ui?.page, "工作台页面");
   assertDistFile(distDir, manifest.background?.service_worker, "后台脚本");
 
   for (const [size, iconPath] of Object.entries(manifest.icons ?? {})) {

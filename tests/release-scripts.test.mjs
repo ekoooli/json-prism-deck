@@ -7,6 +7,7 @@ import { extractReleaseNotes } from "../scripts/release-metadata.mjs";
 import { syncProjectVersion } from "../scripts/sync-version.mjs";
 import { verifyDistribution } from "../scripts/verify-dist.mjs";
 import { verifyReleaseMetadata } from "../scripts/verify-release.mjs";
+import { verifySourceExtension } from "../scripts/verify-source-extension.mjs";
 
 /**
  * 创建隔离的发布元数据测试仓库。
@@ -44,8 +45,9 @@ function createReleaseFixture({ version = "1.0.4", changelog } = {}) {
   }, null, 2));
   writeFileSync(join(rootDir, "manifest.json"), JSON.stringify({ manifest_version: 3, version }, null, 2));
   writeFileSync(join(rootDir, "README.md"), `# JSON Prism Deck\n\n当前版本：\`${version}\`\n`);
-  writeFileSync(join(rootDir, "app.js"), `const DEFAULT_SAMPLE_TEXT = \`{\n  "workspace": {\n    "version": "${version}"\n  }\n}\`;\n`);
-  writeFileSync(join(rootDir, "更新记录.md"), notes);
+  mkdirSync(join(rootDir, "src", "workbench"), { recursive: true });
+  writeFileSync(join(rootDir, "src", "workbench", "main.js"), `const DEFAULT_SAMPLE_TEXT = \`{\n  "workspace": {\n    "version": "${version}"\n  }\n}\`;\n`);
+  writeFileSync(join(rootDir, "CHANGELOG.md"), notes);
 
   return rootDir;
 }
@@ -98,7 +100,7 @@ test("syncProjectVersion updates every version source before release validation"
   assert.equal(packageLock.version, "1.0.5");
   assert.equal(packageLock.packages[""].version, "1.0.5");
   assert.match(readFileSync(join(rootDir, "README.md"), "utf8"), /当前版本：`1\.0\.5`/);
-  assert.match(readFileSync(join(rootDir, "app.js"), "utf8"), /"version": "1\.0\.5"/);
+  assert.match(readFileSync(join(rootDir, "src", "workbench", "main.js"), "utf8"), /"version": "1\.0\.5"/);
   assert.equal(verifyReleaseMetadata({ rootDir, tag: "v1.0.5" }).version, "1.0.5");
 });
 
@@ -114,15 +116,39 @@ test("verifyDistribution requires a root manifest and its referenced extension f
   const distDir = join(rootDir, "dist");
   t.after(() => removeFixture(rootDir));
   mkdirSync(join(distDir, "icons"), { recursive: true });
-  writeFileSync(join(distDir, "index.html"), "<!doctype html>");
+  mkdirSync(join(distDir, "src", "workbench"), { recursive: true });
+  writeFileSync(join(distDir, "src", "workbench", "index.html"), "<!doctype html>");
   writeFileSync(join(distDir, "service-worker.js"), "");
   writeFileSync(join(distDir, "icons", "icon-16.png"), "");
   writeFileSync(join(distDir, "manifest.json"), JSON.stringify({
     manifest_version: 3,
     version: "1.0.5",
     background: { service_worker: "service-worker.js" },
+    options_ui: { page: "src/workbench/index.html" },
     icons: { 16: "icons/icon-16.png" },
   }));
 
   assert.deepEqual(verifyDistribution({ rootDir }), { version: "1.0.5", distDir });
+});
+
+test("verifySourceExtension keeps the project root loadable during development", (t) => {
+  const rootDir = createReleaseFixture({ version: "1.0.5" });
+  t.after(() => removeFixture(rootDir));
+  mkdirSync(join(rootDir, "src", "background"), { recursive: true });
+  mkdirSync(join(rootDir, "src", "assets", "icons"), { recursive: true });
+  writeFileSync(join(rootDir, "src", "workbench", "index.html"), "<!doctype html>");
+  writeFileSync(join(rootDir, "src", "background", "service-worker.js"), "");
+  writeFileSync(join(rootDir, "src", "assets", "icons", "icon-16.png"), "");
+  writeFileSync(join(rootDir, "manifest.json"), JSON.stringify({
+    manifest_version: 3,
+    version: "1.0.5",
+    background: { service_worker: "src/background/service-worker.js" },
+    options_ui: { page: "src/workbench/index.html" },
+    icons: { 16: "src/assets/icons/icon-16.png" },
+  }));
+
+  assert.deepEqual(verifySourceExtension({ rootDir }), {
+    version: "1.0.5",
+    manifestPath: join(rootDir, "manifest.json"),
+  });
 });

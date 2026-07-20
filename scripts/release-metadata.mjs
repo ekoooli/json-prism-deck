@@ -116,7 +116,7 @@ export function readReadmeVersion(readme) {
  * 示例数据既用于演示也用于回归人工验收，版本必须与扩展本体一致，避免用户打开示例时
  * 误以为安装了旧版本。匹配范围限定在 DEFAULT_SAMPLE_TEXT，避免影响其他业务字段。
  *
- * @param {string} appSource app.js 全文。
+ * @param {string} appSource src/workbench/main.js 全文。
  * @return {string} 默认示例声明的版本号。
  * @throws {Error} 当默认示例版本缺失或重复时抛出。
  */
@@ -124,7 +124,7 @@ export function readSampleVersion(appSource) {
   const matches = [...appSource.matchAll(/const DEFAULT_SAMPLE_TEXT = `[\s\S]*?"version": "([^"]+)"/gu)];
 
   if (matches.length !== 1) {
-    throw new Error(`app.js 的 DEFAULT_SAMPLE_TEXT 必须且只能包含一个版本字段；当前找到 ${matches.length} 个。`);
+    throw new Error(`src/workbench/main.js 的 DEFAULT_SAMPLE_TEXT 必须且只能包含一个版本字段；当前找到 ${matches.length} 个。`);
   }
 
   return matches[0][1];
@@ -146,9 +146,9 @@ export function replaceReadmeVersion(readme, version) {
 /**
  * 将默认示例 JSON 的唯一版本字段替换为目标版本。
  *
- * @param {string} appSource app.js 全文。
+ * @param {string} appSource src/workbench/main.js 全文。
  * @param {string} version 合法的目标版本。
- * @return {string} 已同步版本的 app.js 文本。
+ * @return {string} 已同步版本的 src/workbench/main.js 文本。
  */
 export function replaceSampleVersion(appSource, version) {
   assertStableVersion(version);

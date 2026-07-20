@@ -16,28 +16,28 @@ export default defineManifest({
   description: "本地离线 JSON 格式化、压缩、树形预览与元数据分析工作台。",
   permissions: ["clipboardWrite"],
   background: {
-    service_worker: "service-worker.js",
+    service_worker: "src/background/service-worker.js",
     type: "module",
   },
   // 将工作台声明为扩展选项页，让 CRX 在构建时可靠收集页面、主模块与 JSON worker；
   // 工具栏点击仍由后台脚本开新标签页，扩展详情中的“选项”入口只是同一工作台的备用入口。
   options_ui: {
-    page: "index.html",
+    page: "src/workbench/index.html",
     open_in_tab: true,
   },
   action: {
     default_title: "打开 JSON Prism Deck",
     default_icon: {
-      16: "icons/icon-16.png",
-      32: "icons/icon-32.png",
-      48: "icons/icon-48.png",
-      128: "icons/icon-128.png",
+      16: "src/assets/icons/icon-16.png",
+      32: "src/assets/icons/icon-32.png",
+      48: "src/assets/icons/icon-48.png",
+      128: "src/assets/icons/icon-128.png",
     },
   },
   icons: {
-    16: "icons/icon-16.png",
-    32: "icons/icon-32.png",
-    48: "icons/icon-48.png",
-    128: "icons/icon-128.png",
+    16: "src/assets/icons/icon-16.png",
+    32: "src/assets/icons/icon-32.png",
+    48: "src/assets/icons/icon-48.png",
+    128: "src/assets/icons/icon-128.png",
   },
 });

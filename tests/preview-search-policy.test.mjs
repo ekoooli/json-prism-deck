@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { filterShallowPreviewSearchHits } from "../preview-search-policy.js";
+import { filterShallowPreviewSearchHits } from "../src/shared/preview-search-policy.js";
 
 test("同一分支上仅保留最浅命中，避免路径继承把键名重复计进导航", () => {
   const nodeMap = new Map([

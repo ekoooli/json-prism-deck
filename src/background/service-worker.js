@@ -6,7 +6,7 @@
  *
  * @type {string}
  */
-const WORKBENCH_PATH = "index.html";
+const WORKBENCH_PATH = "src/workbench/index.html";
 
 /**
  * 在用户点击工具栏图标时打开完整工作台页面。

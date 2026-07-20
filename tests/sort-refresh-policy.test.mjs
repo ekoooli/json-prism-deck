@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { shouldReparseForSortChange } from "../sort-refresh-policy.js";
+import { shouldReparseForSortChange } from "../src/shared/sort-refresh-policy.js";
 
 test("switching back to source order always reparses from editor text", () => {
   assert.equal(

@@ -3,11 +3,11 @@
 一个可直接加载到 Chrome 的 Manifest V3 JSON 格式化预览插件。
 
 当前版本：`1.0.6`
-更新记录见：[更新记录.md](更新记录.md)
+更新记录见：[CHANGELOG.md](CHANGELOG.md)
 
 ## 功能
 
-- 点击插件图标直接打开 `index.html` 工作台
+- 点击插件图标直接打开 `src/workbench/index.html` 工作台
 - 编辑区支持行号、拖放导入、快捷键格式化/压缩
 - 预览区支持树形 / 文本 / 元数据三种视图
 - 树形预览支持单节点展开折叠、展开全部、折叠全部
@@ -19,11 +19,17 @@
 
 ## 加载方式
 
+### 开发调试
+
 1. 打开 Chrome，进入 `chrome://extensions/`
 2. 打开右上角“开发者模式”
 3. 点击“加载已解压的扩展程序”
-4. 执行 `npm run build` 后，选择当前目录下的 `dist`
-5. 加载完成后点击工具栏图标，即可打开 `chrome-extension://.../index.html`
+4. 选择项目根目录
+5. 修改 `src` 中的代码后，在扩展卡片点击“刷新”即可生效，无需重新构建
+
+### 发布产物
+
+执行 `npm run build` 后，选择或压缩 `dist` 目录；其中的 `manifest.json` 位于根目录，可直接作为发布版扩展加载。
 
 ## 开发与发布
 
@@ -33,7 +39,7 @@ npm run dev
 npm run verify
 ```
 
-正式发布时，先人工补齐 `更新记录.md` 中 `## X.Y.Z - YYYY-MM-DD` 的版本说明，再执行：
+正式发布时，先人工补齐 `CHANGELOG.md` 中 `## X.Y.Z - YYYY-MM-DD` 的版本说明，再执行：
 
 ```bash
 npm run release:prepare -- X.Y.Z

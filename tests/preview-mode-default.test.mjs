@@ -11,19 +11,19 @@ import fs from "node:fs";
  * @return {string} HTML 源码。
  */
 function readWorkbenchHtml() {
-  return fs.readFileSync(new URL("../index.html", import.meta.url), "utf8");
+  return fs.readFileSync(new URL("../src/workbench/index.html", import.meta.url), "utf8");
 }
 
 /**
  * 读取主线程脚本源码。
  *
- * 预览模式默认值和恢复策略都定义在 `app.js` 内部，
+ * 预览模式默认值和恢复策略都定义在 `src/workbench/main.js` 内部，
  * 这里直接校验源码约束，避免为了一个初始化策略测试而伪造整套 DOM 宿主。
  *
  * @return {string} JS 源码。
  */
 function readAppSource() {
-  return fs.readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  return fs.readFileSync(new URL("../src/workbench/main.js", import.meta.url), "utf8");
 }
 
 test("preview mode buttons render in text-tree-meta order and text is initially active", () => {
@@ -85,7 +85,7 @@ test("tree path toggle is tree-only and persists the display preference across t
 
 test("workspace defaults to a 4-to-6 editor and preview split", () => {
   const source = readAppSource();
-  const styles = fs.readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+  const styles = fs.readFileSync(new URL("../src/workbench/styles.css", import.meta.url), "utf8");
 
   assert.match(source, /workspaceRatio:\s*0\.4/);
   assert.match(styles, /--workspace-ratio:\s*0\.4/);

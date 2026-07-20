@@ -6,7 +6,7 @@ import vm from "node:vm";
 /**
  * 加载 worker 内部的树预览辅助函数。
  *
- * `json-worker.js` 在运行时以 classic worker 脚本挂载，不直接对外导出；
+ * `src/workers/json-worker.js` 在运行时以 module worker 脚本挂载，不直接对外导出；
  * 测试通过 vm 注入最小 worker 宿主，把内部函数提出来校验展示协议，
  * 这样可以在不改线上加载方式的前提下覆盖回归场景。
  *
@@ -16,7 +16,7 @@ import vm from "node:vm";
  * }} worker 内部测试钩子。
  */
 function loadWorkerPreviewApi() {
-  const source = fs.readFileSync(new URL("../json-worker.js", import.meta.url), "utf8");
+  const source = fs.readFileSync(new URL("../src/workers/json-worker.js", import.meta.url), "utf8");
   const context = {
     TextEncoder,
     console,

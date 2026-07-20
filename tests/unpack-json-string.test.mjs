@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { canUnpackEmbeddedJson, unpackEmbeddedJsonText } from "../unpack-json-string.js";
+import { canUnpackEmbeddedJson, unpackEmbeddedJsonText } from "../src/shared/unpack-json-string.js";
 
 test("detects root-level JSON string that wraps an object", () => {
   const wrapped = "\"{\\\"name\\\":\\\"Eko\\\",\\\"age\\\":18}\"";

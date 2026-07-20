@@ -52,12 +52,12 @@ export function syncProjectVersion({ rootDir = ROOT_DIR, version }) {
   const packagePath = resolve(rootDir, "package.json");
   const manifestPath = resolve(rootDir, "manifest.json");
   const readmePath = resolve(rootDir, "README.md");
-  const appPath = resolve(rootDir, "app.js");
-  const changelogPath = resolve(rootDir, "更新记录.md");
+  const mainPath = resolve(rootDir, "src/workbench/main.js");
+  const changelogPath = resolve(rootDir, "CHANGELOG.md");
   const packageLockPath = resolve(rootDir, "package-lock.json");
   const changelog = readFileSync(changelogPath, "utf8");
   const readme = readFileSync(readmePath, "utf8");
-  const appSource = readFileSync(appPath, "utf8");
+  const appSource = readFileSync(mainPath, "utf8");
   const packageJson = readJsonObject(packagePath);
   const manifest = readJsonObject(manifestPath);
 
@@ -94,11 +94,11 @@ export function syncProjectVersion({ rootDir = ROOT_DIR, version }) {
   }
 
   writeFileSync(readmePath, nextReadme);
-  writeFileSync(appPath, nextAppSource);
+  writeFileSync(mainPath, nextAppSource);
 
   return {
     version,
-    files: [...jsonWrites.map(([filePath]) => filePath), readmePath, appPath],
+    files: [...jsonWrites.map(([filePath]) => filePath), readmePath, mainPath],
   };
 }
 
