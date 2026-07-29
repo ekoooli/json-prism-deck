@@ -420,8 +420,12 @@ function buildTree(rootValue, sortMode) {
     }
 
     // 搜索大小写敏感与否由主线程的搜索计划决定，这里必须保留原始大小写语料；
-    // 否则一旦在 worker 侧先做 toLowerCase，`Aa` 开关就会失去实现空间。
-    node.searchText = [node.keyLabel, node.path, node.preview, node.metaLabel, node.type].join(" ");
+    // 同时加入 JSON.stringify 后的键名，使预览索引和文本预览的源码表示一致：
+    // 用户搜索 `"name"` 时能命中对象字段，而不会因树形视图去掉展示引号而漏掉该节点。
+    // 根节点没有 JSON 键名，必须排除其序列化得到的 `""`，否则空键搜索会错误先命中根节点并污染导航。
+    // 不在这里预先转小写，否则 `Aa` 开关会失去实现空间。
+    const serializedKeyLabel = item.parentId === null ? "" : JSON.stringify(node.keyLabel);
+    node.searchText = [node.keyLabel, serializedKeyLabel, node.path, node.preview, node.metaLabel, node.type].join(" ");
     nodes.push(node);
   }
 

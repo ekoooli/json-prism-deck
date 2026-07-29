@@ -8,7 +8,7 @@ const STORAGE_KEY = "json-prism-deck-state";
 const DEFAULT_SAMPLE_TEXT = `{
   "workspace": {
     "name": "JSON Prism Deck",
-    "version": "1.0.6",
+    "version": "1.0.7",
     "features": [
       "tree-preview",
       "virtual-scroll",
@@ -3220,7 +3220,7 @@ class JsonPrismDeckApp {
   /**
    * 判断层级展开控件当前是否可用。
    *
-   * 控件只服务结构化预览（树形/文本），并依赖合法 JSON + 非 busy 状态 + 至少一层可展开深度；
+   * 控件只服务结构化预览（树形/文本），并依赖合法 JSON + 非 busy 状态 + 至少一个容器节点；
    * 否则弹层即使打开也没有有效动作，统一禁用并回到默认文案更不容易让用户误解。
    *
    * @return {boolean} 是否可用。
@@ -3228,8 +3228,9 @@ class JsonPrismDeckApp {
   canUseExpandDepthControl() {
     const isStructuredPreviewMode = this.state.valid && (this.state.previewMode === "tree" || this.state.previewMode === "text");
     const hasExpandDepthOption = this.buildExpandDepthOptions(this.state.metadata?.maxDepth || 0).length > 0;
+    const hasExpandableNode = this.state.expandableIds.size > 0;
     const isBusy = this.state.isProcessing || this.state.isEditorBusy;
-    return isStructuredPreviewMode && hasExpandDepthOption && !isBusy;
+    return isStructuredPreviewMode && hasExpandDepthOption && hasExpandableNode && !isBusy;
   }
 
   /**
@@ -3248,11 +3249,11 @@ class JsonPrismDeckApp {
   /**
    * 按指定层级应用展开状态。
    *
-   * @param {number} depth 目标层级（从 1 开始）。
+   * @param {number} depth 目标层级（从 0 开始，0 仅展开根节点）。
    * @return {void}
    */
   applyExpandByDepth(depth) {
-    const targetDepth = Number.isFinite(depth) ? Math.max(1, Math.floor(depth)) : 1;
+    const targetDepth = Number.isFinite(depth) ? Math.max(0, Math.floor(depth)) : 0;
     this.state.selectedExpandDepth = targetDepth;
     this.state.isExpandDepthMenuOpen = false;
     this.state.hasCustomExpansion = true;

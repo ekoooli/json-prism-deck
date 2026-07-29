@@ -1,12 +1,12 @@
 /**
  * 根据当前树最大深度构建“展开层级”选项列表。
  *
- * 根节点深度固定为 0，不属于用户要选择的业务层级；
- * 因此这里从 1 开始生成，避免出现“展开层级0”这种无意义选项。
+ * 根节点深度固定为 0；“展开层级0”表示只保留根容器展开，
+ * 让用户能快速收拢首层字段但仍看见 JSON 的入口结构。
  *
  * @param {number | null | undefined} maxDepth 树总最大深度（可能包含叶子层）。
  * @param {number | null | undefined} [maxExpandableDepth=maxDepth] 可展开容器最大深度。
- * @return {number[]} 可选层级列表（1..maxDepth）。
+ * @return {number[]} 可选层级列表（0..maxDepth）。
  */
 export function buildExpandDepthOptions(maxDepth, maxExpandableDepth = maxDepth) {
   const safeDepth = Number.isFinite(maxDepth) ? Math.max(0, Math.floor(Number(maxDepth))) : 0;
@@ -15,11 +15,7 @@ export function buildExpandDepthOptions(maxDepth, maxExpandableDepth = maxDepth)
     : safeDepth;
   const effectiveDepth = Math.min(safeDepth, safeExpandableDepth);
 
-  if (effectiveDepth < 1) {
-    return [];
-  }
-
-  return Array.from({ length: effectiveDepth }, (_, index) => index + 1);
+  return Array.from({ length: effectiveDepth + 1 }, (_, index) => index);
 }
 
 /**

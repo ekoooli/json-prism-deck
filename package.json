@@ -1,6 +1,6 @@
 {
   "name": "json-prism-deck",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "private": true,
   "description": "本地离线 JSON 格式化、压缩、树形预览与元数据分析 Chrome 扩展。",
   "type": "module",

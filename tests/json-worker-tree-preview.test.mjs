@@ -58,6 +58,21 @@ test("tree search text keeps the long string content instead of the shortened el
   assert.equal(leaf.searchText.includes("FA5A753E3DD6C210519AB142B29F912176A25C5310EBD50A528DBE529DC7E56963A12"), true);
 });
 
+test("tree search text preserves the JSON-quoted form of object keys", () => {
+  const { buildTree } = loadWorkerPreviewApi();
+  const tree = buildTree({ name: "JSON Prism Deck", "": "empty key" }, "source");
+  const nameNode = tree.nodes.find((node) => node.id === "$.name");
+  const emptyKeyNode = tree.nodes.find((node) => node.id === '$[""]');
+  const rootNode = tree.nodes.find((node) => node.id === "$");
+
+  assert.ok(nameNode, "应该能构建出 name 节点");
+  assert.ok(emptyKeyNode, "应该能构建出空字符串键节点");
+  assert.ok(rootNode, "应该能构建出根节点");
+  assert.equal(nameNode.searchText.includes('"name"'), true);
+  assert.equal(emptyKeyNode.searchText.includes('""'), true);
+  assert.equal(rootNode.searchText.includes('""'), false);
+});
+
 test("container nodes expose field and item counts for tree and text previews", () => {
   const { buildTree } = loadWorkerPreviewApi();
   const tree = buildTree({ workspace: { name: "Deck", enabled: true }, records: [1, 2, 3], empty: {} }, "source");
