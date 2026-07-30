@@ -30,3 +30,15 @@ test("互不相干的两条分支各自保留浅层命中", () => {
 
   assert.deepEqual(shallow, allMatches);
 });
+
+test("节点自身文本命中不能因祖先命中而从导航计数中被压掉", () => {
+  const nodeMap = new Map([
+    ["$", { parentId: null }],
+    ["$.workspace", { parentId: "$" }],
+    ["$.workspace.name", { parentId: "$.workspace" }],
+  ]);
+  const allMatches = ["$.workspace", "$.workspace.name"];
+  const shallow = filterShallowPreviewSearchHits(allMatches, nodeMap, new Set(allMatches));
+
+  assert.deepEqual(shallow, allMatches);
+});

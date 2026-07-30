@@ -73,6 +73,44 @@ test("tree search text preserves the JSON-quoted form of object keys", () => {
   assert.equal(rootNode.searchText.includes('""'), false);
 });
 
+test("tree search text preserves a field's JSON source fragment for search navigation", () => {
+  const { buildTree } = loadWorkerPreviewApi();
+  const tree = buildTree({ theme: { mode: "dawn" } }, "source");
+  const modeNode = tree.nodes.find((node) => node.id === "$.theme.mode");
+
+  assert.ok(modeNode, "应该能构建出 mode 节点");
+  assert.equal(modeNode.searchText.includes('"mode": "dawn"'), true);
+});
+
+test("tree search text preserves trailing commas as JSON structure", () => {
+  const { buildTree } = loadWorkerPreviewApi();
+  const tree = buildTree({ theme: { mode: "dawn", palette: [] } }, "source");
+  const modeNode = tree.nodes.find((node) => node.id === "$.theme.mode");
+
+  assert.ok(modeNode, "应该能构建出 mode 节点");
+  assert.equal(modeNode.searchText.includes('"mode": "dawn",'), true);
+});
+
+test("array index labels do not create nonexistent quoted JSON matches", () => {
+  const { buildTree } = loadWorkerPreviewApi();
+  const tree = buildTree({ values: [1] }, "source");
+  const itemNode = tree.nodes.find((node) => node.id === "$.values[0]");
+
+  assert.ok(itemNode, "应该能构建出数组项节点");
+  assert.equal(itemNode.searchText.includes("[0]"), false);
+  assert.equal(itemNode.searchText.includes('"[0]"'), false);
+});
+
+test("tree keeps path matches separate from a node's own searchable content", () => {
+  const { buildTree } = loadWorkerPreviewApi();
+  const tree = buildTree({ workspace: { name: "Deck" } }, "source");
+  const nameNode = tree.nodes.find((node) => node.id === "$.workspace.name");
+
+  assert.ok(nameNode, "应该能构建出 name 节点");
+  assert.equal(nameNode.searchText.includes("$.workspace.name"), false);
+  assert.equal(nameNode.pathSearchText, "$.workspace.name");
+});
+
 test("container nodes expose field and item counts for tree and text previews", () => {
   const { buildTree } = loadWorkerPreviewApi();
   const tree = buildTree({ workspace: { name: "Deck", enabled: true }, records: [1, 2, 3], empty: {} }, "source");

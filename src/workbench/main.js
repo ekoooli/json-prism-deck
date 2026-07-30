@@ -8,7 +8,7 @@ const STORAGE_KEY = "json-prism-deck-state";
 const DEFAULT_SAMPLE_TEXT = `{
   "workspace": {
     "name": "JSON Prism Deck",
-    "version": "1.0.7",
+    "version": "1.0.8",
     "features": [
       "tree-preview",
       "virtual-scroll",
@@ -929,43 +929,264 @@ function buildJsonSyntaxFragment(line, errorColumn = null, searchRanges = []) {
 }
 
 /**
- * 存储桥接层。
+ * IndexedDB 文本载荷存储。
  *
- * JSON 文本、搜索条件和布局仍故意使用 `sessionStorage`，避免多个插件 tab 互相覆盖工作现场；
- * 只有树形路径这种纯展示偏好会单独写进 `localStorage`，使用户新开 tab 时继续沿用显示选择。
+ * 大 JSON 不能继续塞进约 5MB 配额的 `sessionStorage`，否则一次保存失败会让工作现场无法恢复。
+ * 这里仅存编辑器原文；由调用方传入的会话键负责隔离不同 tab，避免把一个 tab 的临时数据带到另一个 tab。
  */
-class StorageBridge {
+class IndexedDbTextStore {
   /**
-   * @param {string} storageKey 持久化 key。
+   * @param {string} databaseName IndexedDB 数据库名。
    */
-  constructor(storageKey) {
+  constructor(databaseName) {
     /** @type {string} */
-    this.storageKey = storageKey;
+    this.databaseName = databaseName;
+    /** @type {Promise<IDBDatabase | null> | null} */
+    this.databasePromise = null;
   }
 
   /**
-   * 读取持久化状态。
+   * 读取指定会话的编辑器文本。
+   *
+   * 存储不可用或读取失败时返回 null 而不抛错，让界面设置仍能恢复；调用方会继续尝试旧 sessionStorage 迁移，
+   * 因此 IndexedDB 临时故障不会让当前页面初始化中断。
+   *
+   * @param {string} key tab 级文本键。
+   * @return {Promise<string | null>} 已保存文本；不存在或读取失败时为 null。
+   */
+  async loadText(key) {
+    const database = await this.openDatabase();
+
+    if (!database) {
+      return null;
+    }
+
+    try {
+      return await new Promise((resolve) => {
+        const transaction = database.transaction("texts", "readonly");
+        const request = transaction.objectStore("texts").get(key);
+
+        request.onsuccess = () => resolve(typeof request.result === "string" ? request.result : null);
+        request.onerror = () => {
+          console.warn("无法读取 IndexedDB 编辑文本，已忽略本次会话恢复。", request.error);
+          resolve(null);
+        };
+        transaction.onabort = () => resolve(null);
+      });
+    } catch (error) {
+      console.warn("无法读取 IndexedDB 编辑文本，已忽略本次会话恢复。", error);
+      return null;
+    }
+  }
+
+  /**
+   * 保存指定会话的编辑器文本。
+   *
+   * 失败必须被吞掉并返回 false：编辑、解析和预览仍可继续，副作用仅限刷新后无法恢复这次文本，
+   * 从而避免 storage quota 再次以未捕获 Promise 的形式打断页面。
+   *
+   * @param {string} key tab 级文本键。
+   * @param {string} text 编辑器完整原文。
+   * @return {Promise<boolean>} 是否实际写入成功。
+   */
+  async saveText(key, text) {
+    const database = await this.openDatabase();
+
+    if (!database) {
+      return false;
+    }
+
+    try {
+      return await new Promise((resolve) => {
+        const transaction = database.transaction("texts", "readwrite");
+        transaction.objectStore("texts").put(text, key);
+        transaction.oncomplete = () => resolve(true);
+        transaction.onerror = () => {
+          console.warn("无法保存 IndexedDB 编辑文本，刷新后不会恢复本次内容。", transaction.error);
+          resolve(false);
+        };
+        transaction.onabort = () => resolve(false);
+      });
+    } catch (error) {
+      console.warn("无法保存 IndexedDB 编辑文本，刷新后不会恢复本次内容。", error);
+      return false;
+    }
+  }
+
+  /**
+   * 打开并初始化文本存储数据库。
+   *
+   * 同一页面复用一个 Promise，避免连续输入触发的防抖保存反复打开数据库；升级时仅创建无 keyPath 的文本表，
+   * 让 tab 会话键成为唯一索引，不引入跨 tab 内容覆盖。
+   *
+   * @return {Promise<IDBDatabase | null>} 可用数据库；运行环境不支持或打开失败时为 null。
+   */
+  openDatabase() {
+    if (this.databasePromise) {
+      return this.databasePromise;
+    }
+
+    if (!globalThis.indexedDB) {
+      console.warn("当前环境不支持 IndexedDB，编辑文本不会在刷新后恢复。");
+      this.databasePromise = Promise.resolve(null);
+      return this.databasePromise;
+    }
+
+    this.databasePromise = new Promise((resolve) => {
+      const request = globalThis.indexedDB.open(this.databaseName, 1);
+
+      request.onupgradeneeded = () => {
+        const database = request.result;
+
+        if (!database.objectStoreNames.contains("texts")) {
+          database.createObjectStore("texts");
+        }
+      };
+      request.onsuccess = () => {
+        const database = request.result;
+        database.onversionchange = () => {
+          database.close();
+          this.databasePromise = null;
+        };
+        resolve(database);
+      };
+      request.onerror = () => {
+        console.warn("无法打开 IndexedDB，编辑文本不会在刷新后恢复。", request.error);
+        resolve(null);
+      };
+      request.onblocked = () => {
+        console.warn("IndexedDB 升级被其他页面阻塞，编辑文本暂时不会在刷新后恢复。");
+      };
+    });
+
+    return this.databasePromise;
+  }
+}
+
+/**
+ * 存储桥接层。
+ *
+ * 编辑器大文本放入 IndexedDB，sessionStorage 只保留小型布局/搜索状态与 tab 会话键；
+ * 因此既保持各 tab 工作现场隔离，又不会因浏览器约 5MB 的 sessionStorage 限制触发 QuotaExceededError。
+ * 树形路径仍是跨 tab 展示偏好，继续单独写入 localStorage。
+ */
+class StorageBridge {
+  /**
+   * @param {string} storageKey 轻量设置的持久化 key。
+   * @param {{ loadText: (key: string) => Promise<string | null>, saveText: (key: string, text: string) => Promise<boolean> }} [payloadStore] 编辑文本存储实现，测试可注入内存替身。
+   */
+  constructor(storageKey, payloadStore = new IndexedDbTextStore(`${storageKey}-payloads`)) {
+    /** @type {string} */
+    this.storageKey = storageKey;
+    /** @type {string} */
+    this.payloadKeyStorageKey = `${storageKey}-payload-key`;
+    /** @type {string} */
+    this.payloadKey = this.getOrCreatePayloadKey();
+    /** @type {{ loadText: (key: string) => Promise<string | null>, saveText: (key: string, text: string) => Promise<boolean> }} */
+    this.payloadStore = payloadStore;
+  }
+
+  /**
+   * 读取当前 tab 的 IndexedDB 键，缺失时创建随机键。
+   *
+   * 旧版完整快照可能已挤满 sessionStorage，首次写入随机键允许失败；随后迁移会先清掉旧文本再重试保存这个键，
+   * 从而让既有用户也能无感迁移到 IndexedDB 而不是卡在原有配额错误上。
+   *
+   * @return {string} 当前 tab 的稳定或临时文本键。
+   */
+  getOrCreatePayloadKey() {
+    try {
+      const storedKey = sessionStorage.getItem(this.payloadKeyStorageKey);
+
+      if (storedKey) {
+        return storedKey;
+      }
+
+      const payloadKey = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+      sessionStorage.setItem(this.payloadKeyStorageKey, payloadKey);
+      return payloadKey;
+    } catch (error) {
+      console.warn("无法立即保存文本会话键，将在释放旧会话数据后重试。", error);
+      return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+    }
+  }
+
+  /**
+   * 读取轻量会话设置并合并当前 tab 的编辑文本。
+   *
+   * 对旧版本快照，先用其中的 text 初始化 IndexedDB，再移除 sessionStorage 内的大字段；迁移失败时仍返回旧文本，
+   * 保证升级本身不会丢失用户正在编辑的数据。
    *
    * @return {Promise<Partial<typeof DEFAULT_SETTINGS>>} 已保存状态。
    */
   async load() {
+    /** @type {Record<string, unknown>} */
+    let stored = {};
+
     try {
       const raw = sessionStorage.getItem(this.storageKey);
-      return raw ? JSON.parse(raw) : {};
+      const parsed = raw ? JSON.parse(raw) : {};
+      stored = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
     } catch (error) {
       console.warn("无法读取会话存储，已回退到默认状态。", error);
-      return {};
     }
+
+    const legacyText = typeof stored.text === "string" ? stored.text : null;
+    const settings = { ...stored };
+    delete settings.text;
+    const indexedText = await this.payloadStore.loadText(this.payloadKey);
+
+    if (typeof indexedText === "string") {
+      return { ...settings, text: indexedText };
+    }
+
+    if (legacyText === null) {
+      return settings;
+    }
+
+    const migrated = await this.payloadStore.saveText(this.payloadKey, legacyText);
+
+    if (migrated) {
+      this.saveSettings(settings);
+    }
+
+    return { ...settings, text: legacyText };
   }
 
   /**
    * 写入持久化状态。
    *
+   * 文本与设置分别保存，任何一侧失败都不会向调用方抛出：当前编辑体验继续可用，失败影响仅限下次刷新恢复。
+   * 先保存 IndexedDB 文本再覆盖 sessionStorage 设置，可避免设置已指向新会话而文本尚未落盘时丢失最新内容。
+   *
    * @param {typeof DEFAULT_SETTINGS} snapshot 需要保存的快照。
-   * @return {Promise<void>}
+   * @return {Promise<boolean>} 编辑文本是否成功持久化。
    */
   async save(snapshot) {
-    sessionStorage.setItem(this.storageKey, JSON.stringify(snapshot));
+    const text = typeof snapshot.text === "string" ? snapshot.text : "";
+    const settings = { ...snapshot };
+    delete settings.text;
+    const textSaved = await this.payloadStore.saveText(this.payloadKey, text);
+    this.saveSettings(settings);
+    return textSaved;
+  }
+
+  /**
+   * 保存不含编辑器文本的小型会话设置。
+   *
+   * 这里先覆盖旧快照以释放其可能残留的大文本，再写入 tab 会话键；若浏览器仍拒绝写入，只记录警告而不打断编辑，
+   * 并让 IndexedDB 继续保留本页面生命周期内已保存的数据。
+   *
+   * @param {Record<string, unknown>} settings 不包含 text 的设置对象。
+   * @return {void}
+   */
+  saveSettings(settings) {
+    try {
+      sessionStorage.setItem(this.storageKey, JSON.stringify(settings));
+      sessionStorage.setItem(this.payloadKeyStorageKey, this.payloadKey);
+    } catch (error) {
+      console.warn("无法保存会话设置，刷新后不会恢复本次状态。", error);
+    }
   }
 
   /**
@@ -2842,9 +3063,9 @@ class JsonPrismDeckApp {
    * 根据当前 query 更新搜索命中与自动展开祖先。
    *
    * 预览命中分两套口径：
-   * - `searchMatchIdSet`：凡是 `searchText` 命中的节点都进集合，用于树/文本行高亮，以及沿命中链自动展开祖先；
+   * - `searchMatchIdSet`：凡是节点自身内容或路径命中的节点都进集合，用于树/文本行高亮，以及沿命中链自动展开祖先；
    * - `state.searchMatches`：只保留「全量命中里每个分支最浅的一层」，用于 `n/m` 计数与上下键跳转。
-   *   否则键名会写进所有子孙的 `path`，同一键在 UI 上被重复计 m 次，但用户语义上只是一处定义。
+   *   其中节点自身命中始终保留，只有路径继承的重复命中才会去重；否则 `"` 这类真实文本搜索会被祖先节点错误压掉。
    *
    * @return {void}
    */
@@ -2859,11 +3080,19 @@ class JsonPrismDeckApp {
     }
 
     const matches = [];
+    const directMatchIdSet = new Set();
     const expression = cloneSearchExpression(this.searchPlan);
 
     for (const node of this.state.nodes) {
-      if (hasSearchMatchWithExpression(node.searchText, expression)) {
+      const isDirectMatch = hasSearchMatchWithExpression(node.searchText, expression);
+      const isPathMatch = isDirectMatch ? false : hasSearchMatchWithExpression(node.pathSearchText, expression);
+
+      if (isDirectMatch || isPathMatch) {
         matches.push(node.id);
+
+        if (isDirectMatch) {
+          directMatchIdSet.add(node.id);
+        }
       }
     }
 
@@ -2878,7 +3107,7 @@ class JsonPrismDeckApp {
       }
     }
 
-    const navigationMatches = filterShallowPreviewSearchHits(matches, this.nodeMap);
+    const navigationMatches = filterShallowPreviewSearchHits(matches, this.nodeMap, directMatchIdSet);
 
     this.state.searchMatches = navigationMatches;
     this.searchMatchIdSet = new Set(matches);

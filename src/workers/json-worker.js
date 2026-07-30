@@ -275,7 +275,8 @@ function extractParseError(error, text) {
  *     expandable: boolean,
  *     preview: string,
  *     metaLabel: string,
- *     searchText: string
+ *     searchText: string,
+ *     pathSearchText: string
  *   }>,
  *   expandableIds: string[],
  *   valueByPath: Map<string, unknown>,
@@ -348,6 +349,7 @@ function buildTree(rootValue, sortMode) {
       preview: "",
       metaLabel: "",
       searchText: "",
+      pathSearchText: "",
     };
 
     valueByPath.set(item.id, item.value);
@@ -419,14 +421,42 @@ function buildTree(rootValue, sortMode) {
       }
     }
 
-    // 搜索大小写敏感与否由主线程的搜索计划决定，这里必须保留原始大小写语料；
-    // 同时加入 JSON.stringify 后的键名，使预览索引和文本预览的源码表示一致：
-    // 用户搜索 `"name"` 时能命中对象字段，而不会因树形视图去掉展示引号而漏掉该节点。
-    // 根节点没有 JSON 键名，必须排除其序列化得到的 `""`，否则空键搜索会错误先命中根节点并污染导航。
-    // 不在这里预先转小写，否则 `Aa` 开关会失去实现空间。
-    const serializedKeyLabel = item.parentId === null ? "" : JSON.stringify(node.keyLabel);
-    node.searchText = [node.keyLabel, serializedKeyLabel, node.path, node.preview, node.metaLabel, node.type].join(" ");
+    // 搜索大小写敏感与否由主线程的搜索计划决定，这里必须保留原始大小写语料，不能预先转小写；
+    // JSON 字段片段需要等所有节点建完、确认父节点是对象还是数组后再补充，避免把数组树标签 `[0]` 错当成源码键 `"[0]"`。
+    node.searchText = [node.preview, node.metaLabel, node.type].join(" ");
+    // 路径单独暴露给主线程，是为了让它区分“节点自身内容命中”和“祖先路径连带命中”。
+    // 若继续混在同一语料里，导航去重无法判断该保留还是压掉子节点，`"` 之类的普通字符搜索就会严重少计。
+    node.pathSearchText = node.path;
     nodes.push(node);
+  }
+
+  /**
+   * 节点初始阶段只知道自己的值，无法确定它在父容器中是否需要尾逗号。
+   * 所有节点构建完后再依据父节点 childIds 的真实顺序补充结构片段，才能让 `,`、`},`、`],` 等搜索
+   * 与格式化文本保持一致，同时避免把最后一项误标成带逗号的不存在内容。
+   */
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+
+  for (const node of nodes) {
+    if (node.expandable) {
+      node.searchText = `${node.searchText} ${node.type === "array" ? "[]" : "{}"}`;
+    }
+
+    if (!node.parentId) {
+      continue;
+    }
+
+    const parent = nodeById.get(node.parentId);
+
+    if (!parent) {
+      continue;
+    }
+
+    const sourceValue = node.expandable ? (node.type === "array" ? "[]" : "{}") : node.preview;
+    const sourcePrefix = parent.type === "object" ? `${JSON.stringify(node.keyLabel)}: ` : "";
+    const hasTrailingComma = parent.childIds[parent.childIds.length - 1] !== node.id;
+    const sourceFragment = `${sourcePrefix}${sourceValue}${hasTrailingComma ? "," : ""}`;
+    node.searchText = `${node.searchText} ${sourceFragment}`;
   }
 
   return {
